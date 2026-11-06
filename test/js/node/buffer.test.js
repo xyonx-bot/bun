@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import { join } from "node:path";
+import util from "node:util";
 import vm from "node:vm";
 
 const BufferModule = await import("buffer");
@@ -3790,6 +3791,29 @@ for (let withOverridenBufferWrite of [false, true]) {
       it("inspect() should exist", () => {
         expect(Buffer.prototype.inspect).toBeInstanceOf(Function);
         expect(new Buffer("123").inspect()).toBe(Bun.inspect(new Buffer("123")));
+      });
+
+      it("inspect() lists the non-enumerable keys of its extra values for showHidden", () => {
+        const buf = Buffer.from("ab");
+        buf.prop = Object.defineProperty({ shown: 1 }, "hidden", { value: 2, enumerable: false });
+        Object.defineProperty(buf, "hiddenProp", { value: 7, enumerable: false });
+        const listed = "<Buffer 61 62, prop: { shown: 1, [hidden]: 2 }, hiddenProp: 7>";
+        const plain = "<Buffer 61 62, prop: { shown: 1 }>";
+        expect({
+          utilInspect: util.inspect(buf, { showHidden: true }),
+          utilFormat: util.format("%o", buf),
+          inspect: buf.inspect(2, { showHidden: true }),
+          utilInspectPlain: util.inspect(buf),
+          utilFormatPlain: util.format("%O", buf),
+          inspectPlain: buf.inspect(2, { showHidden: false }),
+        }).toEqual({
+          utilInspect: listed,
+          utilFormat: listed,
+          inspect: listed,
+          utilInspectPlain: plain,
+          utilFormatPlain: plain,
+          inspectPlain: plain,
+        });
       });
 
       it("read alias", () => {

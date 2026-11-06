@@ -97,8 +97,7 @@ extern "C" size_t highway_index_of_char(const uint8_t* haystack, size_t haystack
 extern "C" size_t highway_last_index_of_char(const uint8_t* haystack, size_t haystack_len, uint8_t needle);
 static constexpr size_t kHighwayNotFound = ~static_cast<size_t>(0);
 
-// export fn Bun__inspect_singleline(globalThis: *JSGlobalObject, value: JSValue) bun.String
-extern "C" BunString Bun__inspect_singleline(Zig::GlobalObject* globalObject, JSC::JSValue value);
+extern "C" BunString Bun__inspect_singleline_show_hidden(Zig::GlobalObject* globalObject, JSC::JSValue value, bool showHidden);
 
 using namespace JSC;
 using namespace WebCore;
@@ -1947,11 +1946,12 @@ static JSC::EncodedJSValue jsBufferPrototypeFunction_inspectBody(JSC::JSGlobalOb
 
     // Inspect special properties as well, if possible.
     if (ctx.toBoolean(globalObject)) {
-        auto showHidden = ctx.get(globalObject, Identifier::fromString(vm, "showHidden"_s));
+        auto showHiddenValue = ctx.get(globalObject, Identifier::fromString(vm, "showHidden"_s));
         RETURN_IF_EXCEPTION(scope, {});
         JSC::PropertyNameArrayBuilder array(vm, PropertyNameMode::StringsAndSymbols, PrivateSymbolMode::Exclude);
 
-        auto filter = showHidden.toBoolean(globalObject) ? DontEnumPropertiesMode::Include : DontEnumPropertiesMode::Exclude;
+        const bool showHidden = showHiddenValue.toBoolean(globalObject);
+        auto filter = showHidden ? DontEnumPropertiesMode::Include : DontEnumPropertiesMode::Exclude;
 
         if (castedThis->hasNonReifiedStaticProperties()) [[unlikely]] {
             castedThis->reifyAllStaticProperties(globalObject);
@@ -1973,7 +1973,7 @@ static JSC::EncodedJSValue jsBufferPrototypeFunction_inspectBody(JSC::JSGlobalOb
                 result.append(": "_s);
                 auto value = castedThis->get(globalObject, ident);
                 RETURN_IF_EXCEPTION(scope, {});
-                auto inspected = Bun__inspect_singleline(globalObject, value).transferToWTFString();
+                auto inspected = Bun__inspect_singleline_show_hidden(globalObject, value, showHidden).transferToWTFString();
                 RETURN_IF_EXCEPTION(scope, {});
                 result.append(inspected);
                 i++;
