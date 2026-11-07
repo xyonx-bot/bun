@@ -1992,6 +1992,30 @@ static std::optional<bool> specialObjectsDequalSlow(const DeepEqualsMode& mode, 
                 }
             }
 
+            if (mode.checkPrototypes) {
+                // The walk above takes its names from the left Error. node's entry points compare a pair of Set or Map entries once, so a name that only the right Error enumerates is compared here.
+                for (size_t j = 0; j < propertyArrayLength2; j++) {
+                    Identifier i2 = a2[j];
+                    if (i2 == vm.propertyNames->stack || a1.data()->propertyNameVector().contains(i2)) continue;
+                    PropertyName propertyName2 = PropertyName(i2);
+
+                    JSValue prop1 = left->getIfPropertyExists(globalObject, propertyName2);
+                    RETURN_IF_EXCEPTION(scope, {});
+                    if (!prop1) {
+                        return false;
+                    }
+
+                    JSValue prop2 = right->get(globalObject, propertyName2);
+                    RETURN_IF_EXCEPTION(scope, {});
+
+                    bool propertiesEqual = mode.deepEquals(globalObject, prop1, prop2, gcBuffer, stack, scope, true);
+                    RETURN_IF_EXCEPTION(scope, {});
+                    if (!propertiesEqual) {
+                        return false;
+                    }
+                }
+            }
+
             return true;
         }
         break;
@@ -2360,6 +2384,13 @@ std::optional<bool> specialObjectsDequal(JSC::JSGlobalObject* globalObject, Mark
             return false;
         }
 
+        if constexpr (checkPrototypes) {
+            // node compares the own keys of a Set, then each pair of its members once, as (member of the first, member of the second). This answers for all of it: an answer of std::nullopt would have the arm asked again with the operands exchanged.
+            return Bun::NodeObjEquiv::setsEqual(globalObject, scope, set1, set2, [&](JSValue left, JSValue right) {
+                return Bun__deepEquals<isStrict, enableAsymmetricMatchers, checkPrototypes, skipPrototypeIdentity>(globalObject, left, right, gcBuffer, stack, scope, true);
+            });
+        }
+
         auto iter1 = JSSetIterator::create(vm, globalObject->setIteratorStructure(), set1, IterationKind::Keys);
         JSValue key1;
         while (iter1->next(globalObject, key1)) {
@@ -2388,10 +2419,6 @@ std::optional<bool> specialObjectsDequal(JSC::JSGlobalObject* globalObject, Mark
             }
         }
 
-        if constexpr (checkPrototypes) {
-            // node also compares own enumerable properties of Sets.
-            break;
-        }
         return true;
     }
     case JSMapType: {
@@ -2405,6 +2432,13 @@ std::optional<bool> specialObjectsDequal(JSC::JSGlobalObject* globalObject, Mark
 
         if (leftSize != map2->size()) {
             return false;
+        }
+
+        if constexpr (checkPrototypes) {
+            // As for a Set: the own keys, then each pair of entries once, as (entry of the first, entry of the second).
+            return Bun::NodeObjEquiv::mapsEqual(globalObject, scope, map1, map2, [&](JSValue left, JSValue right) {
+                return Bun__deepEquals<isStrict, enableAsymmetricMatchers, checkPrototypes, skipPrototypeIdentity>(globalObject, left, right, gcBuffer, stack, scope, true);
+            });
         }
 
         auto iter1 = JSMapIterator::create(vm, globalObject->mapIteratorStructure(), map1, IterationKind::Entries);
@@ -2442,10 +2476,6 @@ std::optional<bool> specialObjectsDequal(JSC::JSGlobalObject* globalObject, Mark
             }
         }
 
-        if constexpr (checkPrototypes) {
-            // node also compares own enumerable properties of Maps.
-            break;
-        }
         return true;
     }
     case ArrayBufferType:

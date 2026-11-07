@@ -373,8 +373,29 @@ function proxyWhoseTrapsThrow<T extends object>(target: T = {} as T): T {
 }
 
 const sharedPromise = Promise.resolve(1);
+const otherSharedPromise = Promise.resolve(2);
 const sharedWeakMap = new WeakMap();
 const sharedWeakSet = new WeakSet();
+const sharedObject = { a: 1 };
+const sharedArray = [1, 2, 3];
+
+/**
+ * `[1, 2]` whose second element is a getter that is not enumerable. Node calls it equal to `[1, <hole>]` as the first
+ * operand only.
+ */
+function withHiddenGetterElement(): number[] {
+  return Object.defineProperty([1, 2], 1, { enumerable: false, configurable: true, get: () => 2 });
+}
+
+function selfHoldingSet() {
+  const set = new Set<unknown>();
+  return set.add(set);
+}
+
+function selfHoldingMap() {
+  const map = new Map<unknown, unknown>();
+  return map.set("self", map);
+}
 
 const ecKeys = [generateKeyPairSync("ec", { namedCurve: "P-256" }), generateKeyPairSync("ec", { namedCurve: "P-256" })];
 const rsaPublicKey = generateKeyPairSync("rsa", { modulusLength: 1024 }).publicKey;
@@ -1027,6 +1048,194 @@ const cases: Case[] = [
   },
   { name: "sets holding -0 and 0", a: () => new Set([-0]), b: () => new Set([0]), strict: true, loose: true },
   { name: "sets holding NaN", a: () => new Set([NaN]), b: () => new Set([NaN]), strict: true, loose: true },
+  { name: "two empty sets", a: () => new Set(), b: () => new Set(), strict: true, loose: true },
+  { name: "a set and a map", a: () => new Set(), b: () => new Map(), strict: false, loose: false },
+  { name: "a set and an object", a: () => new Set(), b: () => ({}), strict: false, loose: false },
+  {
+    name: "two empty maps with an equal own property",
+    a: () => withExtraProperty(new Map()),
+    b: () => withExtraProperty(new Map()),
+    strict: true,
+    loose: true,
+  },
+  // A member or a key that `typeof` does not call an object has a partner only in itself.
+  {
+    name: "sets holding different numbers",
+    a: () => new Set([1, 2]),
+    b: () => new Set([1, 3]),
+    strict: false,
+    loose: false,
+  },
+  {
+    name: "a set holding 1 and {} and a set holding '1' and {}",
+    a: () => new Set([1, {}]),
+    b: () => new Set(["1", {}]),
+    strict: false,
+    loose: true,
+    looseBug: "reports not equal",
+  },
+  {
+    name: "a set holding 1 and two objects and a set holding three objects",
+    a: () => new Set([1, { a: 1 }, { b: 1 }]),
+    b: () => new Set([{ a: 1 }, { b: 1 }, { c: 1 }]),
+    strict: false,
+    loose: false,
+  },
+  {
+    name: "a set holding three objects and a set holding two of them and 1",
+    a: () => new Set([{ a: 1 }, { b: 1 }, { c: 1 }]),
+    b: () => new Set([{ a: 1 }, { b: 1 }, 1]),
+    strict: false,
+    loose: false,
+  },
+  {
+    name: "sets holding the same function",
+    a: () => new Set([sharedConstructor]),
+    b: () => new Set([sharedConstructor]),
+    strict: true,
+    loose: true,
+  },
+  {
+    name: "sets holding different functions",
+    a: () => new Set([function () {}]),
+    b: () => new Set([function () {}]),
+    strict: false,
+    loose: false,
+  },
+  {
+    name: "sets holding different functions beside three equal objects",
+    a: () => new Set([function () {}, { a: 1 }, { b: 1 }, { c: 1 }]),
+    b: () => new Set([function () {}, { a: 1 }, { b: 1 }, { c: 1 }]),
+    strict: false,
+    loose: false,
+  },
+  {
+    name: "maps with different number keys",
+    a: () => new Map([[1, 1]]),
+    b: () => new Map([[2, 1]]),
+    strict: false,
+    loose: false,
+  },
+  {
+    name: "maps holding undefined under the same key",
+    a: () => new Map([[1, undefined]]),
+    b: () => new Map([[1, undefined]]),
+    strict: true,
+    loose: true,
+  },
+  {
+    name: "maps holding undefined under different keys",
+    a: () => new Map([[1, undefined]]),
+    b: () => new Map([[2, undefined]]),
+    strict: false,
+    loose: false,
+  },
+  {
+    name: "maps holding different values under the same key",
+    a: () => new Map([["k", 1]]),
+    b: () => new Map([["k", 2]]),
+    strict: false,
+    loose: false,
+  },
+  {
+    name: "a map with the keys 1 and { a: 1 } and a map with the keys { a: 1 } and { b: 1 }",
+    a: () =>
+      new Map<unknown, number>([
+        [1, 1],
+        [{ a: 1 }, 1],
+      ]),
+    b: () =>
+      new Map<unknown, number>([
+        [{ a: 1 }, 1],
+        [{ b: 1 }, 1],
+      ]),
+    strict: false,
+    loose: false,
+  },
+  {
+    name: "maps with the same function as a key",
+    a: () => new Map([[sharedConstructor, 1]]),
+    b: () => new Map([[sharedConstructor, 1]]),
+    strict: true,
+    loose: true,
+  },
+  {
+    name: "maps with different functions as keys",
+    a: () => new Map([[function () {}, 1]]),
+    b: () => new Map([[function () {}, 1]]),
+    strict: false,
+    loose: false,
+  },
+  {
+    name: "sets holding 1 and { a: 1 }",
+    a: () => new Set([1, { a: 1 }]),
+    b: () => new Set([1, { a: 1 }]),
+    strict: true,
+    loose: true,
+  },
+  {
+    name: "a set holding { a: 1 } and 1 and a set holding 1 and { a: 1 }",
+    a: () => new Set([{ a: 1 }, 1]),
+    b: () => new Set([1, { a: 1 }]),
+    strict: true,
+    loose: true,
+  },
+  {
+    name: "a set holding { a: 1 } and { b: 1 } and a set holding { b: 1 } and { c: 1 }",
+    a: () => new Set([{ a: 1 }, { b: 1 }]),
+    b: () => new Set([{ b: 1 }, { c: 1 }]),
+    strict: false,
+    loose: false,
+  },
+  // Members and keys that are objects, in another order.
+  {
+    name: "maps with three deep-equal object keys in another order",
+    a: () =>
+      new Map([
+        [{ a: 1 }, 1],
+        [{ b: 1 }, 2],
+        [{ c: 1 }, 3],
+      ]),
+    b: () =>
+      new Map([
+        [{ c: 1 }, 3],
+        [{ a: 1 }, 1],
+        [{ b: 1 }, 2],
+      ]),
+    strict: true,
+    loose: true,
+  },
+  {
+    name: "maps with three deep-equal object keys that hold other values",
+    a: () =>
+      new Map([
+        [{ a: 1 }, 1],
+        [{ b: 1 }, 2],
+        [{ c: 1 }, 3],
+      ]),
+    b: () =>
+      new Map([
+        [{ c: 1 }, 1],
+        [{ a: 1 }, 2],
+        [{ b: 1 }, 3],
+      ]),
+    strict: false,
+    loose: false,
+  },
+  {
+    name: "sets holding four deep-equal objects in another order",
+    a: () => new Set([{ a: 1 }, { b: 1 }, { c: 1 }, { d: 1 }]),
+    b: () => new Set([{ d: 1 }, { b: 1 }, { a: 1 }, { c: 1 }]),
+    strict: true,
+    loose: true,
+  },
+  {
+    name: "sets holding nine deep-equal objects in another order",
+    a: () => new Set(Array.from({ length: 9 }, (_, id) => ({ id }))),
+    b: () => new Set(Array.from({ length: 9 }, (_, id) => ({ id: (id * 4) % 9 }))),
+    strict: true,
+    loose: true,
+  },
 
   // "WeakMap and WeakSet instances are not compared structurally. They are only
   // equal if they reference the same object." -- nodejs.org/api/assert.html
@@ -2164,7 +2373,7 @@ const orderedPairs: OrderedPair[] = [
     strict: [true, true],
     loose: [true, true],
   },
-  // Known differences: Map and Set entries, and the keys of an Error, are still read by other walks.
+  // A pair of entries of two Maps or two Sets is read as any other pair: the entry of the first operand is the first.
   {
     first: "a Map holding { b: 2, a: 1 }",
     second: "a Map holding a Proxy of { a: 1, b: 2 } whose get trap answers 99 for a",
@@ -2172,7 +2381,6 @@ const orderedPairs: OrderedPair[] = [
     b: () => new Map([["k", lyingProxy({ a: 1, b: 2 }, "a", 99)]]),
     strict: [false, true],
     loose: [false, true],
-    strictBug: [undefined, "reports not equal"],
     looseBug: [undefined, "reports not equal"],
   },
   {
@@ -2182,9 +2390,10 @@ const orderedPairs: OrderedPair[] = [
     b: () => new Set([lyingProxy({ a: 1, b: 2 }, "a", 99)]),
     strict: [false, true],
     loose: [false, true],
-    strictBug: [undefined, "reports not equal"],
     looseBug: [undefined, "reports not equal"],
   },
+  // Known difference: the keys of an Error are still read by another walk. It takes the keys that each Error lists, and
+  // looks for a key of one among all the properties of the other.
   {
     first: "an Error with x: 1",
     second: "an Error with y: 1 and a non-enumerable x: 1",
@@ -2192,8 +2401,26 @@ const orderedPairs: OrderedPair[] = [
     b: () => Object.defineProperty(Object.assign(new Error("m"), { y: 1 }), "x", { value: 1 }),
     strict: [false, false],
     loose: [false, false],
-    strictBug: ["reports equal", undefined],
     looseBug: ["reports equal", undefined],
+  },
+  {
+    first: "an Error with x: 1 and a non-enumerable y: 2",
+    second: "an Error with y: 1 and a non-enumerable x: 1",
+    a: () => Object.defineProperty(Object.assign(new Error("m"), { x: 1 }), "y", { value: 2 }),
+    b: () => Object.defineProperty(Object.assign(new Error("m"), { y: 1 }), "x", { value: 1 }),
+    strict: [false, false],
+    loose: [false, false],
+    looseBug: ["reports equal", undefined],
+  },
+  {
+    first: "an Error with x: 1 and a non-enumerable y: 1",
+    second: "an Error with y: 1 and a non-enumerable x: 1",
+    a: () => Object.defineProperty(Object.assign(new Error("m"), { x: 1 }), "y", { value: 1 }),
+    b: () => Object.defineProperty(Object.assign(new Error("m"), { y: 1 }), "x", { value: 1 }),
+    strict: [false, false],
+    loose: [false, false],
+    strictBug: ["reports equal", "reports equal"],
+    looseBug: ["reports equal", "reports equal"],
   },
   {
     first: "an Error with an enumerable stack 'A'",
@@ -2216,7 +2443,7 @@ const orderedPairs: OrderedPair[] = [
     strictBug: ["reports not equal", "reports not equal"],
     looseBug: ["reports not equal", "reports not equal"],
   },
-  // Known difference: a Map or a Set compares a pair of entries more than once, so such a getter runs too often.
+  // A pair of entries is compared once: a second comparison would find such arrays with other lengths.
   {
     first: "a Map holding [<hole>] with a getter x that pushes an element",
     second: "another such Map",
@@ -2224,7 +2451,459 @@ const orderedPairs: OrderedPair[] = [
     b: () => new Map([["k", withGetterX(new Array<number>(1), array => void array.push(1))]]),
     strict: [true, true],
     loose: [true, true],
-    strictBug: ["reports not equal", "reports not equal"],
+  },
+  // Node compares an entry of the first Set or Map with an entry of the second, in that order (setEquiv and mapEquiv
+  // in lib/internal/util/comparisons.js). So a pair that is equal in one argument order is equal in that order inside a
+  // collection too, wherever it is.
+  {
+    first: "a Set holding [1, <hidden getter 2>]",
+    second: "a Set holding [1, <hole>]",
+    a: () => new Set([withHiddenGetterElement()]),
+    b: () => new Set([[1, ,]]),
+    strict: [true, false],
+    loose: [true, false],
+    looseBug: [undefined, "reports equal"],
+  },
+  {
+    first: "a Map holding [1, <hidden getter 2>] under k",
+    second: "a Map holding [1, <hole>] under k",
+    a: () => new Map([["k", withHiddenGetterElement()]]),
+    b: () => new Map([["k", [1, ,]]]),
+    strict: [true, false],
+    loose: [true, false],
+    looseBug: [undefined, "reports equal"],
+  },
+  {
+    first: "a Map with the key [1, <hidden getter 2>]",
+    second: "a Map with the key [1, <hole>]",
+    a: () => new Map([[withHiddenGetterElement(), 1]]),
+    b: () => new Map([[[1, ,], 1]]),
+    strict: [true, false],
+    loose: [true, false],
+    looseBug: [undefined, "reports equal"],
+  },
+  {
+    first: "a Set holding a Set holding [1, <hidden getter 2>]",
+    second: "a Set holding a Set holding [1, <hole>]",
+    a: () => new Set([new Set([withHiddenGetterElement()])]),
+    b: () => new Set([new Set([[1, ,]])]),
+    strict: [true, false],
+    loose: [true, false],
+    looseBug: [undefined, "reports equal"],
+  },
+  {
+    first: "a Map holding a Map holding [1, <hidden getter 2>]",
+    second: "a Map holding a Map holding [1, <hole>]",
+    a: () => new Map([["k", new Map([["k", withHiddenGetterElement()]])]]),
+    b: () => new Map([["k", new Map([["k", [1, ,]]])]]),
+    strict: [true, false],
+    loose: [true, false],
+    looseBug: [undefined, "reports equal"],
+  },
+  {
+    first: "a Set holding [1, <hidden getter 2>] and [9]",
+    second: "a Set holding [9] and [1, <hole>]",
+    a: () => new Set([withHiddenGetterElement(), [9]]),
+    b: () => new Set([[9], [1, ,]]),
+    strict: [true, false],
+    loose: [true, false],
+    looseBug: [undefined, "reports equal"],
+  },
+  {
+    first: "a Set holding [8], [1, <hidden getter 2>] and [9]",
+    second: "a Set holding [9], [1, <hole>] and [8]",
+    a: () => new Set([[8], withHiddenGetterElement(), [9]]),
+    b: () => new Set([[9], [1, ,], [8]]),
+    strict: [true, false],
+    loose: [true, false],
+    looseBug: [undefined, "reports equal"],
+  },
+  {
+    first: "a Map with the keys [8], [1, <hidden getter 2>] and [9]",
+    second: "a Map with the keys [9], [1, <hole>] and [8]",
+    a: () =>
+      new Map([
+        [[8], 1],
+        [withHiddenGetterElement(), 1],
+        [[9], 1],
+      ]),
+    b: () =>
+      new Map([
+        [[9], 1],
+        [[1, ,], 1],
+        [[8], 1],
+      ]),
+    strict: [true, false],
+    loose: [true, false],
+    looseBug: [undefined, "reports equal"],
+  },
+  {
+    first: "a Set holding an object with an own hidden constructor",
+    second: "a Set holding {}",
+    a: () => new Set([withOwnConstructor(Object.prototype, sharedConstructor)]),
+    b: () => new Set([{}]),
+    strict: [true, false],
+    loose: [true, true],
+  },
+  {
+    first: "a Map holding an object with an own hidden constructor under k",
+    second: "a Map holding {} under k",
+    a: () => new Map([["k", withOwnConstructor(Object.prototype, sharedConstructor)]]),
+    b: () => new Map([["k", {}]]),
+    strict: [true, false],
+    loose: [true, true],
+  },
+  // The own keys of a Set or a Map are read as those of any object, index keys too.
+  {
+    first: "a Set with an own key 0 that holds 1",
+    second: "a Set with no own key",
+    a: () => Object.assign(new Set([1]), { 0: 1 }),
+    b: () => new Set([1]),
+    strict: [false, false],
+    loose: [false, false],
+    looseBug: ["reports equal", "reports equal"],
+  },
+  {
+    first: "a Set with an own key 0 that holds [1, <hidden getter 2>]",
+    second: "a Set with an own key 0 that holds [1, <hole>]",
+    a: () => Object.assign(new Set([1]), { 0: withHiddenGetterElement() }),
+    b: () => Object.assign(new Set([1]), { 0: [1, ,] }),
+    strict: [true, false],
+    loose: [true, false],
+    looseBug: [undefined, "reports equal"],
+  },
+  {
+    first: "a Map with an own key x that holds [1, <hidden getter 2>]",
+    second: "a Map with an own key x that holds [1, <hole>]",
+    a: () => Object.assign(new Map([[1, 1]]), { x: withHiddenGetterElement() }),
+    b: () => Object.assign(new Map([[1, 1]]), { x: [1, ,] }),
+    strict: [true, false],
+    loose: [true, false],
+    looseBug: [undefined, "reports equal"],
+  },
+  // An entry of the second Set or Map is the partner of one entry of the first.
+  {
+    first: "a Set holding [1, <hole>] twice",
+    second: "a Set holding [1, <hole>] and [1, <hidden 2>]",
+    a: () =>
+      new Set([
+        [1, ,],
+        [1, ,],
+      ]),
+    b: () => new Set([[1, ,], Object.defineProperty([1, 2], 1, { enumerable: false })]),
+    strict: [false, true],
+    loose: [false, true],
+    looseBug: ["reports equal", "reports not equal"],
+  },
+  {
+    first: "a Set holding { a: 1 } twice",
+    second: "a Set holding { a: 1 } and { a: 2 }",
+    a: () => new Set([{ a: 1 }, { a: 1 }]),
+    b: () => new Set([{ a: 1 }, { a: 2 }]),
+    strict: [false, false],
+    loose: [false, false],
+    looseBug: ["reports equal", undefined],
+  },
+  {
+    first: "a Set holding { a: 1 }, { a: 1 } and { a: 2 }",
+    second: "a Set holding { a: 1 }, { a: 2 } and { a: 2 }",
+    a: () => new Set([{ a: 1 }, { a: 1 }, { a: 2 }]),
+    b: () => new Set([{ a: 1 }, { a: 2 }, { a: 2 }]),
+    strict: [false, false],
+    loose: [false, false],
+    looseBug: ["reports equal", "reports equal"],
+  },
+  {
+    first: "a Map with the keys { a: 1 }, { a: 1 } and { a: 2 }",
+    second: "a Map with the keys { a: 1 }, { a: 2 } and { a: 2 }",
+    a: () =>
+      new Map([
+        [{ a: 1 }, 1],
+        [{ a: 1 }, 1],
+        [{ a: 2 }, 1],
+      ]),
+    b: () =>
+      new Map([
+        [{ a: 1 }, 1],
+        [{ a: 2 }, 1],
+        [{ a: 2 }, 1],
+      ]),
+    strict: [false, false],
+    loose: [false, false],
+    looseBug: ["reports equal", "reports equal"],
+  },
+  {
+    first: "a Map with the keys { a: 1 } and { a: 1 } that hold 1 and 2",
+    second: "a Map with such keys that hold 2 and 1",
+    a: () =>
+      new Map([
+        [{ a: 1 }, 1],
+        [{ a: 1 }, 2],
+      ]),
+    b: () =>
+      new Map([
+        [{ a: 1 }, 2],
+        [{ a: 1 }, 1],
+      ]),
+    strict: [true, true],
+    loose: [true, true],
+    looseBug: ["reports not equal", "reports not equal"],
+  },
+  {
+    first: "a Map with the keys { a: 1 } and { a: 1 } that hold 1 and 2",
+    second: "a Map with such keys that both hold 1",
+    a: () =>
+      new Map([
+        [{ a: 1 }, 1],
+        [{ a: 1 }, 2],
+      ]),
+    b: () =>
+      new Map([
+        [{ a: 1 }, 1],
+        [{ a: 1 }, 1],
+      ]),
+    strict: [false, false],
+    loose: [false, false],
+    looseBug: [undefined, "reports equal"],
+  },
+  // A member or a key that both operands hold.
+  {
+    first: "a Set holding a shared object and { b: 2 }",
+    second: "a Set holding { b: 2 } and the shared object",
+    a: () => new Set([sharedObject, { b: 2 }]),
+    b: () => new Set([{ b: 2 }, sharedObject]),
+    strict: [true, true],
+    loose: [true, true],
+  },
+  {
+    first: "a Set holding a shared object, { b: 2 } and { c: 3 }",
+    second: "a Set holding { c: 3 }, the shared object and { b: 2 }",
+    a: () => new Set([sharedObject, { b: 2 }, { c: 3 }]),
+    b: () => new Set([{ c: 3 }, sharedObject, { b: 2 }]),
+    strict: [true, true],
+    loose: [true, true],
+  },
+  {
+    first: "a Set holding a copy of a shared object and that object",
+    second: "a Set holding the shared object and another copy",
+    a: () => new Set([{ a: 1 }, sharedObject]),
+    b: () => new Set([sharedObject, { a: 1 }]),
+    strict: [true, true],
+    loose: [true, true],
+  },
+  {
+    first: "a Map that holds 1 under a shared object and 2 under a copy of it",
+    second: "a Map that holds 2 under another copy and 1 under the shared object",
+    a: () =>
+      new Map([
+        [sharedObject, 1],
+        [{ a: 1 }, 2],
+      ]),
+    b: () =>
+      new Map([
+        [{ a: 1 }, 2],
+        [sharedObject, 1],
+      ]),
+    strict: [true, true],
+    loose: [true, true],
+    looseBug: [undefined, "reports not equal"],
+  },
+  {
+    first: "a Map that holds 1 under a shared object and 2 under a copy of it",
+    second: "a Map that holds 2 under the shared object and 1 under another copy",
+    a: () =>
+      new Map([
+        [sharedObject, 1],
+        [{ a: 1 }, 2],
+      ]),
+    b: () =>
+      new Map([
+        [sharedObject, 2],
+        [{ a: 1 }, 1],
+      ]),
+    strict: [true, true],
+    loose: [true, true],
+    looseBug: ["reports not equal", "reports not equal"],
+  },
+  {
+    first: "a Map that holds 1 under a shared object and 2 under a copy of it",
+    second: "a Map that holds 3 under the shared object and 1 under another copy",
+    a: () =>
+      new Map([
+        [sharedObject, 1],
+        [{ a: 1 }, 2],
+      ]),
+    b: () =>
+      new Map([
+        [sharedObject, 3],
+        [{ a: 1 }, 1],
+      ]),
+    strict: [false, false],
+    loose: [false, false],
+  },
+  {
+    first: "a Map that holds { v: 1 } under a shared object and { v: 2 } under a copy of it",
+    second: "a Map that holds { v: 2 } under the shared object and { v: 1 } under another copy",
+    a: () =>
+      new Map([
+        [sharedObject, { v: 1 }],
+        [{ a: 1 }, { v: 2 }],
+      ]),
+    b: () =>
+      new Map([
+        [sharedObject, { v: 2 }],
+        [{ a: 1 }, { v: 1 }],
+      ]),
+    strict: [true, true],
+    loose: [true, true],
+    looseBug: ["reports not equal", "reports not equal"],
+  },
+  {
+    first: "a Map that holds { v: 1 } under a shared object and { v: 2 } under a copy of it",
+    second: "a Map that holds { v: 3 } under the shared object and { v: 1 } under another copy",
+    a: () =>
+      new Map([
+        [sharedObject, { v: 1 }],
+        [{ a: 1 }, { v: 2 }],
+      ]),
+    b: () =>
+      new Map([
+        [sharedObject, { v: 3 }],
+        [{ a: 1 }, { v: 1 }],
+      ]),
+    strict: [false, false],
+    loose: [false, false],
+  },
+  {
+    first: "a Map that holds 1 under a shared object",
+    second: "a Map that holds 2 under it",
+    a: () => new Map([[sharedObject, 1]]),
+    b: () => new Map([[sharedObject, 2]]),
+    strict: [false, false],
+    loose: [false, false],
+  },
+  {
+    first: "a Map whose key is a shared Promise",
+    second: "another Map with that key",
+    a: () => new Map([[sharedPromise, 1]]),
+    b: () => new Map([[sharedPromise, 1]]),
+    strict: [true, true],
+    loose: [true, true],
+  },
+  // Not as Node, on purpose: Bun takes a member or a key that both operands hold for its own partner. Node compares
+  // it with the other entries, as an object, and so calls each of these three pairs not equal.
+  {
+    first: "a Set holding a shared object and a copy of it",
+    second: "a Set holding the shared object and another copy",
+    a: () => new Set([sharedObject, { a: 1 }]),
+    b: () => new Set([sharedObject, { a: 1 }]),
+    strict: [false, false],
+    loose: [false, false],
+    strictBug: ["reports equal", "reports equal"],
+    looseBug: ["reports equal", "reports equal"],
+  },
+  {
+    first: "a Map whose keys are two shared Promises",
+    second: "another Map with those keys",
+    a: () =>
+      new Map([
+        [sharedPromise, 1],
+        [otherSharedPromise, 2],
+      ]),
+    b: () =>
+      new Map([
+        [sharedPromise, 1],
+        [otherSharedPromise, 2],
+      ]),
+    strict: [false, false],
+    loose: [true, true],
+    strictBug: ["reports equal", "reports equal"],
+  },
+  {
+    first: "a Map with the keys [1, <hidden getter 2>, 3] and a shared [1, 2, 3]",
+    second: "a Map with the keys the shared [1, 2, 3] and [1, <hole>, 3]",
+    a: () =>
+      new Map([
+        [Object.defineProperty([1, 0, 3], 1, { enumerable: false, configurable: true, get: () => 2 }), 1],
+        [sharedArray, 1],
+      ]),
+    b: () =>
+      new Map([
+        [sharedArray, 1],
+        [[1, , 3], 1],
+      ]),
+    strict: [false, false],
+    loose: [false, false],
+    strictBug: ["reports equal", undefined],
+    looseBug: ["reports equal", "reports equal"],
+  },
+  // An Error as an entry: the keys of both Errors are listed.
+  {
+    first: "a Set holding an Error with x: 1",
+    second: "a Set holding an Error with y: 1 and a non-enumerable x: 1",
+    a: () => new Set([Object.assign(new Error("m"), { x: 1 })]),
+    b: () => new Set([Object.defineProperty(Object.assign(new Error("m"), { y: 1 }), "x", { value: 1 })]),
+    strict: [false, false],
+    loose: [false, false],
+    looseBug: ["reports equal", undefined],
+  },
+  {
+    first: "a Map holding an Error with x: 1 under k",
+    second: "a Map holding an Error with y: 1 and a non-enumerable x: 1 under k",
+    a: () => new Map([["k", Object.assign(new Error("m"), { x: 1 })]]),
+    b: () => new Map([["k", Object.defineProperty(Object.assign(new Error("m"), { y: 1 }), "x", { value: 1 })]]),
+    strict: [false, false],
+    loose: [false, false],
+    looseBug: ["reports equal", undefined],
+  },
+  // A Set or a Map that holds itself.
+  {
+    first: "a Set that holds itself",
+    second: "another such Set",
+    a: selfHoldingSet,
+    b: selfHoldingSet,
+    strict: [true, true],
+    loose: [true, true],
+  },
+  {
+    first: "a Map that holds itself",
+    second: "another such Map",
+    a: selfHoldingMap,
+    b: selfHoldingMap,
+    strict: [true, true],
+    loose: [true, true],
+  },
+  {
+    first: "a Map that is its own key",
+    second: "another such Map",
+    a: () => {
+      const map = new Map<unknown, unknown>();
+      return map.set(map, 1);
+    },
+    b: () => {
+      const map = new Map<unknown, unknown>();
+      return map.set(map, 1);
+    },
+    strict: [true, true],
+    loose: [true, true],
+  },
+  {
+    first: "a Set holding a Set that holds itself",
+    second: "another such Set",
+    a: () => new Set([selfHoldingSet()]),
+    b: () => new Set([selfHoldingSet()]),
+    strict: [true, true],
+    loose: [true, true],
+    looseBug: ["throws a RangeError", "throws a RangeError"],
+  },
+  {
+    first: "a Map holding a Map that holds itself",
+    second: "another such Map",
+    a: () => new Map([["k", selfHoldingMap()]]),
+    b: () => new Map([["k", selfHoldingMap()]]),
+    strict: [true, true],
+    loose: [true, true],
+    looseBug: ["throws a RangeError", "throws a RangeError"],
   },
   // An array behind a Proxy with no trap, and with a get trap that answers for its length.
   {
@@ -3394,8 +4073,7 @@ describe("util.isDeepStrictEqual", () => {
       });
     });
 
-    // Known difference: a Map or a Set compares its entries before its own keys. Node reads the keys first.
-    test("the own keys of a Map before its entries", { expectFailure: isBun }, () => {
+    test("the own keys of a Map before its entries", () => {
       const throwing = () =>
         Object.defineProperty(new Map([[1, {}]]), "a", {
           enumerable: true,
@@ -3408,6 +4086,255 @@ describe("util.isDeepStrictEqual", () => {
         name: "RangeError",
         message: "from the getter",
       });
+    });
+
+    // An object with a getter v that logs `name`, then answers `value`.
+    const logging = (name: string, value: unknown, log: string[]) => ({
+      get v() {
+        log.push(name);
+        return value;
+      },
+    });
+
+    test("the own keys of a Set or a Map, then its entries", () => {
+      for (const make of [
+        (name: string, log: string[]) => new Set([logging(`${name}.entry`, 1, log)]),
+        (name: string, log: string[]) => new Map([["k", logging(`${name}.entry`, 1, log)]]),
+        (name: string, log: string[]) => new Map([[logging(`${name}.entry`, 1, log), 1]]),
+      ]) {
+        const log: string[] = [];
+        const withOwnKey = (name: string) =>
+          Object.defineProperty(make(name, log), "own", {
+            enumerable: true,
+            get() {
+              log.push(`${name}.own`);
+              return 1;
+            },
+          });
+        const equal = util.isDeepStrictEqual(withOwnKey("first"), withOwnKey("second"));
+        same({ equal, log }, { equal: true, log: ["first.own", "second.own", "first.entry", "second.entry"] });
+      }
+    });
+
+    test("each pair of entries once, the entry of the first operand first", () => {
+      for (const make of [
+        (name: string, log: string[]) => new Set([1, 2, 3].map(index => logging(name + index, index, log))),
+        (name: string, log: string[]) => new Map([1, 2, 3].map(index => [index, logging(name + index, index, log)])),
+        (name: string, log: string[]) => new Map([1, 2, 3].map(index => [logging(name + index, index, log), index])),
+      ]) {
+        const log: string[] = [];
+        const equal = util.isDeepStrictEqual(make("first", log), make("second", log));
+        same({ equal, log }, { equal: true, log: ["first1", "second1", "first2", "second2", "first3", "second3"] });
+      }
+    });
+
+    // An entry that has no partner at the front of those that are left asks the last one, then the others from the
+    // back.
+    test("the entries of the second operand from the front, then from the back", () => {
+      const log: string[] = [];
+      const members = (name: string, values: number[]) =>
+        new Set(values.map(value => logging(name + value, value, log)));
+      const equal = util.isDeepStrictEqual(members("first", [1, 2, 3, 4]), members("second", [3, 4, 2, 1]));
+      same(
+        { equal, log },
+        {
+          equal: true,
+          log: [
+            ...["first1", "second3", "first1", "second1"],
+            ...["first2", "second2"],
+            ...["first3", "second4", "first3", "second3"],
+            ...["first4", "second4"],
+          ],
+        },
+      );
+    });
+
+    test("two members of a Set as node's walk of small Sets reads them", () => {
+      const members = (name: string, values: number[], log: string[]) =>
+        new Set(values.map(value => logging(name + value, value, log)));
+      for (const [second, equal, reads] of [
+        [[1, 2], true, "first1 second1 first2 second2"],
+        [[2, 1], true, "first1 second2 first2 second2 first1 second1"],
+        [[1, 9], false, "first1 second1 first2 second9"],
+      ] as const) {
+        const log: string[] = [];
+        same(
+          {
+            equal: util.isDeepStrictEqual(members("first", [1, 2], log), members("second", [...second], log)),
+            reads: log.join(" "),
+          },
+          { equal, reads },
+        );
+      }
+    });
+
+    test("an entry once with the one entry that is left", () => {
+      const log: string[] = [];
+      const members = (name: string, values: number[]) =>
+        new Set(values.map(value => logging(name + value, value, log)));
+      const equal = util.isDeepStrictEqual(members("first", [1, 2, 3]), members("second", [1, 2, 9]));
+      same({ equal, log }, { equal: false, log: ["first1", "second1", "first2", "second2", "first3", "second9"] });
+    });
+
+    // The values under a key that both Maps hold are compared once, also where they differ.
+    test("the two values under a key that both Maps hold", () => {
+      const log: string[] = [];
+      const first = new Map([
+        [sharedObject, logging("first.shared", 1, log)],
+        [{ a: 1 }, logging("first.copy", 2, log)],
+      ]);
+      const second = new Map([
+        [sharedObject, logging("second.shared", 2, log)],
+        [{ a: 1 }, logging("second.copy", 1, log)],
+      ]);
+      const equal = util.isDeepStrictEqual(first, second);
+      same(
+        { equal, log },
+        {
+          equal: true,
+          log: [
+            ...["first.shared", "second.shared"],
+            ...["first.shared", "second.copy"],
+            ...["first.copy", "second.shared"],
+          ],
+        },
+      );
+    });
+
+    test("an entry as often at every depth of Sets and Maps", () => {
+      for (const wrap of [
+        (value: unknown) => new Set([value]),
+        (value: unknown) => new Map([["k", value]]),
+        (value: unknown) => new Map([[value, 1]]),
+      ]) {
+        const reads = [0, 1, 2, 3, 8].map(depth => {
+          const log: string[] = [];
+          const nested = (name: string) => {
+            let value: unknown = logging(name, 1, log);
+            for (let level = 0; level < depth; level++) value = wrap(value);
+            return value;
+          };
+          assert.strictEqual(util.isDeepStrictEqual(nested("first"), nested("second")), true);
+          return log.join(" ");
+        });
+        same(reads, Array(5).fill("first second"));
+      }
+    });
+
+    test("the value of a Map entry only where its key has a partner", () => {
+      const log: string[] = [];
+      const map = (name: string, key: object) => new Map([[key, logging(name, 1, log)]]);
+      assert.strictEqual(util.isDeepStrictEqual(map("first", { a: 1 }), map("second", { a: 2 })), false);
+      same(log, []);
+      assert.strictEqual(util.isDeepStrictEqual(map("first", { a: 1 }), map("second", { a: 1 })), true);
+      same(log, ["first", "second"]);
+    });
+
+    // Not as Node, on purpose: a key that both Maps hold is not read. Node compares it with itself, as an object.
+    test("a key that both Maps hold", { expectFailure: isBun }, () => {
+      const log: string[] = [];
+      const shared = logging("shared", 1, log);
+      const map = () =>
+        new Map<object, number>([
+          [shared, 1],
+          [{ a: 1 }, 2],
+        ]);
+      assert.strictEqual(util.isDeepStrictEqual(map(), map()), true);
+      same(log, ["shared", "shared"]);
+    });
+
+    // Known difference: Node reads past its list of entries that need a partner and throws a TypeError. Bun has no
+    // partner for such an entry.
+    test("a Set whose member adds a member to it while they are compared", { expectFailure: isBun }, () => {
+      const growing = new Set<object>();
+      growing.add({
+        get v() {
+          growing.add({ v: 4 });
+          return 1;
+        },
+      });
+      growing.add({ v: 2 }).add({ v: 3 });
+      assert.throws(() => util.isDeepStrictEqual(growing, new Set([{ v: 1 }, { v: 2 }, { v: 3 }])), TypeError);
+    });
+
+    test("a Set or a Map that loses or gains an entry of the second operand while they are compared", () => {
+      const second = new Set<object>();
+      second.add({
+        get v() {
+          second.add({ v: 4 });
+          return 1;
+        },
+      });
+      second.add({ v: 2 }).add({ v: 3 });
+      assert.strictEqual(util.isDeepStrictEqual(new Set([{ v: 1 }, { v: 2 }, { v: 3 }]), second), true);
+
+      const key = { v: 1 };
+      const losing = new Map<object, number>([
+        [key, 1],
+        [{ v: 2 }, 1],
+        [{ v: 3 }, 1],
+      ]);
+      const first = new Map<object, number>([
+        [
+          {
+            get v() {
+              losing.delete(key);
+              return 1;
+            },
+          },
+          1,
+        ],
+        [{ v: 2 }, 1],
+        [{ v: 3 }, 1],
+      ]);
+      assert.strictEqual(util.isDeepStrictEqual(first, losing), false);
+    });
+
+    test("the entries of two Maps that hold the same keys, in any order", () => {
+      const keys = Array.from({ length: 200 }, (_, id) => ({ id }));
+      const inOrder = () => new Map(keys.map((key, index) => [key, index]));
+      const reversed = new Map(keys.map((key, index) => [key, index] as const).reverse());
+      assert.strictEqual(util.isDeepStrictEqual(inOrder(), inOrder()), true);
+      assert.strictEqual(util.isDeepStrictEqual(inOrder(), reversed), true);
+      assert.strictEqual(util.isDeepStrictEqual(reversed, inOrder()), true);
+      assert.strictEqual(util.isDeepStrictEqual(inOrder(), new Map(reversed).set(keys[100], -1)), false);
+      assert.strictEqual(util.isDeepStrictEqual(new Map(reversed).set(keys[100], -1), inOrder()), false);
+    });
+
+    test("a Set or a Map in a pair that is equal in one argument order, through every strict entry point", () => {
+      const first = () => new Set([new Map([[withHiddenGetterElement(), withHiddenGetterElement()]])]);
+      const second = () =>
+        new Set([
+          new Map([
+            [
+              [1, ,],
+              [1, ,],
+            ],
+          ]),
+        ]);
+      const lenient = new (assert as any).Assert({ skipPrototype: true });
+      same(
+        [
+          util.isDeepStrictEqual(first(), second()),
+          util.isDeepStrictEqual(second(), first()),
+          util.isDeepStrictEqual(first(), second(), true as any),
+          util.isDeepStrictEqual(second(), first(), true as any),
+          caught(() => assert.deepStrictEqual(first(), second())) === null,
+          caught(() => assert.deepStrictEqual(second(), first())) === null,
+          caught(() => assert.notDeepStrictEqual(first(), second())) === null,
+          caught(() => assert.notDeepStrictEqual(second(), first())) === null,
+          caught(() => assert.strict.deepEqual(first(), second())) === null,
+          caught(() => assert.strict.deepEqual(second(), first())) === null,
+          caught(() => lenient.deepStrictEqual(first(), second())) === null,
+          caught(() => lenient.deepStrictEqual(second(), first())) === null,
+        ],
+        [true, false, true, false, true, false, false, true, true, false, true, false],
+      );
+      const thrower = (entries: unknown) => () => {
+        throw Object.assign(new Error("m"), { entries });
+      };
+      assert.throws(thrower(first()), { entries: second() });
+      assert.strictEqual(caught(() => assert.throws(thrower(second()), { entries: first() }))?.code, "ERR_ASSERTION");
     });
 
     // Known difference: before the keys, Bun reads `constructor` and Symbol.toStringTag fewer times than Node.
