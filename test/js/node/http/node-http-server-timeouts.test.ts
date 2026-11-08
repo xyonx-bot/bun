@@ -670,6 +670,67 @@ describe("node:http server writes restart the socket inactivity timeout", () => 
     }
   });
 
+  // Between two requests the keep-alive timeout takes the place of the socket's timer, with
+  // another period here, and the next request arms the first one again.
+  test.concurrent.each(["server.timeout", "res.setTimeout(ms)"])(
+    "%s lets each response on a kept-alive connection stream past it, then keepAliveTimeout closes the connection",
+    async armedBy => {
+      const KEEP_ALIVE = TIMEOUT * 1.5;
+      let lastWriteAt = 0;
+      let timedOutAt = 0;
+      let responses = 0;
+      let reference: ReturnType<typeof setTimeout> | undefined;
+      const { promise: settled, resolve: onSettled } = Promise.withResolvers<string>();
+      const server = http.createServer((req, res) => {
+        if (armedBy === "res.setTimeout(ms)") res.setTimeout(TIMEOUT);
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        const startedAt = performance.now();
+        const interval = setInterval(() => {
+          lastWriteAt = performance.now();
+          if (lastWriteAt - startedAt < TIMEOUT * 1.25) {
+            res.write("chunk\n");
+            return;
+          }
+          clearInterval(interval);
+          res.end("done\n");
+          // Long after the keep-alive timeout of the idle connection.
+          if (++responses === 2) reference = setTimeout(() => onSettled("the reference timer"), KEEP_ALIVE * 3);
+        }, TIMEOUT / 8);
+        res.on("close", () => clearInterval(interval));
+      });
+      if (armedBy === "server.timeout") server.timeout = TIMEOUT;
+      server.keepAliveTimeout = KEEP_ALIVE;
+      server.keepAliveTimeoutBuffer = 0;
+      server.on("timeout", socket => {
+        timedOutAt = performance.now();
+        onSettled(`'timeout' after ${responses} responses`);
+        socket.destroy();
+      });
+      const port = await listen(server);
+      let client: net.Socket | undefined;
+      try {
+        client = await send(port, GET);
+        let received = "";
+        let requests = 1;
+        client.on("data", chunk => {
+          received += chunk;
+          // The end of the first response: the connection is idle now.
+          if (requests === 1 && received.endsWith("done\n\r\n0\r\n\r\n")) {
+            requests++;
+            client!.write(GET);
+          }
+        });
+        expect(await Promise.race([settled, lost(client)])).toBe("'timeout' after 2 responses");
+        expect(timedOutAt - lastWriteAt).toBeGreaterThanOrEqual(KEEP_ALIVE - SLACK);
+      } finally {
+        clearTimeout(reference);
+        client?.destroy();
+        server.closeAllConnections();
+        server.close();
+      }
+    },
+  );
+
   // One case for each way the server puts bytes on the connection, and for each call that puts
   // none there in Node. `before` runs when the request arrives, `act` half a period later.
   type Act = (res: http.ServerResponse) => void;
