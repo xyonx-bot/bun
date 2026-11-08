@@ -1,5 +1,5 @@
 // What the compiler reads in place of src/js/node/_http_server.ts, which `bun run` evaluates. The two do the same.
-// Written against that file with the SHA-256 e21f565802cfde6b56aca780222ebdf2ae1ef8477f298308f08edc22e5d16ea1.
+// Written against that file with the SHA-256 0b52e6a7fe3f74869fe1617d54d2e73dd9df950b96e63adebc71698b72830fe9.
 // When that file changes, bring the change here and write the new hash: test/internal/second-texts-of-modules.test.ts.
 
 // Hardcoded module "node:_http_server"
@@ -2979,14 +2979,13 @@ function getNodeHTTPServerSocket(): NodeHTTPServerSocketConstructor {
           this.removeListener("timeout", callback);
         }
       } else {
-        let timer: $Node.Timeout | undefined = existingTimer;
         // The keep-alive cycle re-arms the same idle interval after every
         // response: refresh the existing timer instead of clear+allocate.
         if (existingTimer && (this.$armedTimeout >= 0 ? this.$armedTimeout : existingTimer._idleTimeout) === msecs) {
           existingTimer.refresh();
         } else {
           if (existingTimer) clearTimeout(existingTimer);
-          timer = setTimeout(onSocketTimeoutTimerExpired, msecs, this);
+          const timer: $Node.Timeout = setTimeout(onSocketTimeoutTimerExpired, msecs, this);
           timer.unref();
           this[kSocketTimeoutTimer] = timer;
           this.$armedTimeout = msecs;
@@ -2994,7 +2993,7 @@ function getNodeHTTPServerSocket(): NodeHTTPServerSocketConstructor {
         // The native connection refreshes it on each write of a response: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L1019
         // Not the keep-alive timer, which nothing writes under: a default server would pay a refresh per write.
         if (!this[kKeepAliveTimeoutSet]) {
-          this[kHandle]?.setInactivityTimer(timer);
+          this[kHandle]?.setInactivityTimer(this[kSocketTimeoutTimer]);
         } else if (existingTimer) {
           this[kHandle]?.setInactivityTimer(undefined);
         }

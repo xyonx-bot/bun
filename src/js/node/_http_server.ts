@@ -2198,21 +2198,20 @@ function getNodeHTTPServerSocket() {
           this.removeListener("timeout", callback);
         }
       } else {
-        let timer = existingTimer;
         // The keep-alive cycle re-arms the same idle interval after every
         // response: refresh the existing timer instead of clear+allocate.
         if (existingTimer && existingTimer._idleTimeout === msecs) {
           existingTimer.refresh();
         } else {
           if (existingTimer) clearTimeout(existingTimer);
-          timer = setTimeout(onSocketTimeoutTimerExpired, msecs, this);
+          const timer = setTimeout(onSocketTimeoutTimerExpired, msecs, this);
           timer.unref();
           this[kSocketTimeoutTimer] = timer;
         }
         // The native connection refreshes it on each write of a response: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L1019
         // Not the keep-alive timer, which nothing writes under: a default server would pay a refresh per write.
         if (!this[kKeepAliveTimeoutSet]) {
-          this[kHandle]?.setInactivityTimer(timer);
+          this[kHandle]?.setInactivityTimer(this[kSocketTimeoutTimer]);
         } else if (existingTimer) {
           this[kHandle]?.setInactivityTimer(undefined);
         }
