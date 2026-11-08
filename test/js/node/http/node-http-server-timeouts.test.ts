@@ -703,6 +703,8 @@ describe("node:http server writes restart the socket inactivity timeout", () => 
       server.keepAliveTimeoutBuffer = 0;
       server.on("timeout", socket => {
         timedOutAt = performance.now();
+        // A machine that stalls for a whole period between two writes gets a 'timeout' that is due. The listener keeps the socket.
+        if (responses < 2 && timedOutAt - lastWriteAt >= TIMEOUT - SLACK) return;
         onSettled(`'timeout' after ${responses} responses`);
         socket.destroy();
       });
