@@ -70,8 +70,6 @@ public:
     int closeReadError = 0;
     /* Whether the connection closed before the kernel had taken everything, also after an upgrade to a WebSocket. */
     std::optional<bool> closedWithUnsentData;
-    /* Guards m_pipelinedResponses. It is here because it fits in the padding behind closedWithUnsentData. */
-    mutable WTF::Lock m_pipelinedResponsesLock;
     /* Tunnel bytes that onData() queued for JS in tasks that have not run yet. */
     size_t queuedTunnelBytes = 0;
     const char* peerCertVerifyErrorCode = nullptr;
@@ -201,9 +199,10 @@ public:
     mutable JSC::WriteBarrier<JSC::JSObject> m_duplex;
     mutable JSC::WriteBarrier<JSC::JSObject> m_inactivityTimer;
 
-    /* Queued pipelined responses (see appendPipelinedResponse). m_pipelinedResponsesLock
-     * keeps mutation on the JS thread coherent with the concurrent GC marker walking
+    /* Queued pipelined responses (see appendPipelinedResponse). The lock keeps
+     * mutation on the JS thread coherent with the concurrent GC marker walking
      * the vector in visitChildren. */
+    mutable WTF::Lock m_pipelinedResponsesLock;
     mutable WTF::Vector<JSC::WriteBarrier<JSNodeHTTPResponse>, 2> m_pipelinedResponses;
 
     DECLARE_INFO;
