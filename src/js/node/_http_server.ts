@@ -1967,7 +1967,6 @@ function getNodeHTTPServerSocket() {
     _onTimeout() {
       const handle = this[kHandle];
       // A write in progress holds 'timeout' back once: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L596-L611
-      // Never the keep-alive one, whose timer the native connection does not have.
       if ((this.writableLength > 0 || handle?.response?.bufferedAmount > 0) && handle?.holdTimeoutBackOnce()) {
         this._unrefTimer();
         return;
@@ -2202,8 +2201,7 @@ function getNodeHTTPServerSocket() {
           timer.unref();
           this[kSocketTimeoutTimer] = timer;
         }
-        // The native connection refreshes it on each write of a response: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L1019
-        // Not the keep-alive timer, which nothing writes under: a default server would pay a refresh per write.
+        // Server writes refresh it there (Node: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L1019). Never the keep-alive timer: nothing writes under it.
         if (!this[kKeepAliveTimeoutSet]) {
           this[kHandle]?.setInactivityTimer(this[kSocketTimeoutTimer]);
         }

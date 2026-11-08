@@ -1,5 +1,5 @@
 // What the compiler reads in place of src/js/node/_http_server.ts, which `bun run` evaluates. The two do the same.
-// Written against that file with the SHA-256 c376c0efe78a6ca8dd67d99b85d829cb06bd02ecb86ce56cba6c9241f36d55b9.
+// Written against that file with the SHA-256 df29fce6ff93f4a8d63cc1c5d87397d1fcd318e8873c814236a1ebdf47182c53.
 // When that file changes, bring the change here and write the new hash: test/internal/second-texts-of-modules.test.ts.
 
 // Hardcoded module "node:_http_server"
@@ -2742,7 +2742,6 @@ function getNodeHTTPServerSocket(): NodeHTTPServerSocketConstructor {
     _onTimeout() {
       const handle = this[kHandle];
       // A write in progress holds 'timeout' back once: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L596-L611
-      // Never the keep-alive one, whose timer the native connection does not have.
       if ((this.writableLength > 0 || handle?.response?.bufferedAmount! > 0) && handle?.holdTimeoutBackOnce()) {
         this._unrefTimer();
         return;
@@ -2984,8 +2983,7 @@ function getNodeHTTPServerSocket(): NodeHTTPServerSocketConstructor {
           this[kSocketTimeoutTimer] = timer;
           this.$armedTimeout = msecs;
         }
-        // The native connection refreshes it on each write of a response: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L1019
-        // Not the keep-alive timer, which nothing writes under: a default server would pay a refresh per write.
+        // Server writes refresh it there (Node: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L1019). Never the keep-alive timer: nothing writes under it.
         if (!this[kKeepAliveTimeoutSet]) {
           this[kHandle]?.setInactivityTimer(this[kSocketTimeoutTimer]);
         }

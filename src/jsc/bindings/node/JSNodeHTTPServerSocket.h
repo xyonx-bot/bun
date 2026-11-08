@@ -106,9 +106,7 @@ public:
      * (ms; 0 disables a check). Reports a given message at most once. */
     bool isRequestTimedOut(uint64_t headersTimeoutMs, uint64_t requestTimeoutMs);
 
-    /* node:http server compat: JS hands over the Timeout of an armed socket inactivity timeout (socket.setTimeout,
-     * server.timeout; not the keep-alive one), or takes it back with null. Each write of the server and the progress
-     * of a pending write then refresh it, like net.Socket in Node. */
+    /* node:http: takes the Timeout of an armed socket inactivity timeout (never the keep-alive one), or null. Server writes and the progress of a pending write refresh it, like net.Socket in Node. */
     void setInactivityTimer(JSC::VM& vm, JSC::JSObject* timer);
     void touchInactivityTimer();
     /* For a timer that fired with a write still pending, where Node looks at writeQueueSize. True once, then false until something refreshes the timer. */

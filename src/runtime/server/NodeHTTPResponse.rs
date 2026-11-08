@@ -887,8 +887,7 @@ fn refresh_inactivity_timer(raw_response: uws::AnyResponse) {
 }
 
 impl NodeHTTPResponse {
-    /// The server writes to the connection, which restarts an armed socket inactivity timeout as in Node's
-    /// `net.Socket._writeGeneric`. Call it after the last check that can throw and before the write, which can close the socket.
+    /// The server writes to the connection: restarts an armed socket inactivity timeout, as Node's `net.Socket._writeGeneric` does. Call it behind the last check that can throw and before the write, which can close the socket.
     #[inline]
     fn note_write_dispatched(&self, raw_response: uws::AnyResponse, state: uws::State) {
         // Node holds a write back behind one that is pending, so a peer that stopped reading still times out. The progress of the pending one counts instead.
