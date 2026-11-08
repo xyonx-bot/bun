@@ -145,15 +145,11 @@ void GCPerformanceEntries::callListeners()
                 if (!scope.exception()) [[likely]]
                     continue;
             }
-            // A termination that leaves the VM running (the deadline of a node:vm run) ends the hand-off. The records that no listener has taken wait for the next turn.
-            Records rest;
-            for (unsigned k = j ? i + 1 : i; k < records.size(); ++k)
-                rest.append(records[k]);
-            if (!rest.isEmpty() && !clientData->isStoppingOrStopped(m_vm)) {
-                rest.appendVector(m_records);
-                m_records = WTF::move(rest);
-                Bun__VM__setGCPerformanceEntriesWait(m_bunVM, true);
-            }
+            // A termination ends the hand-off. Where it leaves the VM running (the deadline of a node:vm run), the record in hand and those behind it are handed over again in a later turn: none is lost, and a listener can get one twice.
+            records.removeAt(0, i);
+            records.appendVector(m_records);
+            m_records = WTF::move(records);
+            Bun__VM__setGCPerformanceEntriesWait(m_bunVM, true);
             return;
         }
     }

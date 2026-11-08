@@ -1613,92 +1613,138 @@ describe("gc entries", () => {
   });
 
   // The deadline of a node:vm run ends the script that a nested wait of the event loop runs: Bun.build() waits for
-  // setup(). The hand-off does not enter script with that termination pending, so the record waits and arrives after
-  // the run.
-  const runsIntoAVMTimeoutInANestedWait = (passesTheDeadline: string, then: string) => `
+  // setup(). Under load the deadline can pass before the task of the run has collected, so the run is made again until
+  // `done` says that it did what the test is about. A task that comes after its run does nothing, because no deadline
+  // would end it there.
+  const runsIntoAVMTimeoutInANestedWait = (inTheTask: string) => `
     const vm = require("node:vm");
     const { readFile } = require("node:fs");
     const { PerformanceObserver, constants } = require("node:perf_hooks");
     const never = new Promise(() => {});
+    const isForced = entry => entry.detail.flags === constants.NODE_PERFORMANCE_GC_FLAGS_FORCED;
+    let inTheRun = false;
+    let forcedCollections = 0;
     globalThis.collectInATask = () => {
       readFile(__filename, () => {
+        if (!inTheRun) return;
+        forcedCollections++;
         Bun.gc(true);
-        ${passesTheDeadline}
+        ${inTheTask}
       });
     };
-    function run() {
-      const keepAlive = setInterval(() => {}, 1000);
+    function runUntil(done) {
       let code;
-      new PerformanceObserver((list, observer) => {
-        if (!list.getEntries().some(entry => entry.detail.flags === constants.NODE_PERFORMANCE_GC_FLAGS_FORCED)) return;
-        observer.disconnect();
-        ${then}
-      }).observe({ type: "gc" });
-      try {
-        vm.runInNewContext(
-          "collectInATask(); Bun.build({ entrypoints: ['./entry.js'], plugins: [{ name: 'never', setup: () => never }] })",
-          { Bun, never, collectInATask },
-          { timeout: 100 },
-        );
-      } catch (error) {
-        code = error.code;
-      }
-      const finish = result => {
-        clearInterval(keepAlive);
-        console.log(JSON.stringify({ code, ...result }));
-      };
+      do {
+        inTheRun = true;
+        try {
+          vm.runInNewContext(
+            "collectInATask(); Bun.build({ entrypoints: ['./entry.js'], plugins: [{ name: 'never', setup: () => never }] })",
+            { Bun, never, collectInATask },
+            { timeout: 100 },
+          );
+        } catch (error) {
+          code = error.code;
+        }
+        inTheRun = false;
+      } while (!done());
+      return code;
     }
   `;
 
-  concurrent.each([
-    ["in the task that collected", `for (;;) {}`],
-    // The deadline passes in native code, so the first script that runs then takes the termination: the listener.
-    ["in the listener of the hand-off", `Bun.sleepSync(300);`],
-  ])(
-    "the entry of a collection arrives after a node:vm timeout that ends a nested wait %s",
-    async (_, passesTheDeadline) => {
-      using dir = tempDir("perf-hooks-gc-vm-timeout", {
-        "entry.js": `export default 1;`,
-        "main.cjs": `${runsIntoAVMTimeoutInANestedWait(passesTheDeadline, `finish({ arrived: true });`)} run();`,
-      });
-      await using proc = tracked(
-        Bun.spawn({ cmd: [bunExe(), "main.cjs"], env: bunEnv, cwd: String(dir), stdout: "pipe", stderr: "pipe" }),
-      );
-      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
-      expect(stderr).toBe("");
-      expect(JSON.parse(stdout)).toEqual({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT", arrived: true });
-      expect(exitCode).toBe(0);
-    },
-  );
-
-  // A "beforeExit" listener runs with no callback of the event loop under it. The hand-off leaves the loop as it found
-  // it: afterwards the tick and the microtask of a timer still run before the next timer.
-  concurrent("callbacks keep their order after a node:vm timeout that a hand-off met", async () => {
-    using dir = tempDir("perf-hooks-gc-vm-timeout-order", {
-      "entry.js": `export default 1;`,
-      "main.cjs": `
-        ${runsIntoAVMTimeoutInANestedWait(
-          `for (;;) {}`,
-          `const order = [];
-           setTimeout(() => {
-             order.push("timer 1");
-             Promise.resolve().then(() => order.push("microtask"));
-             process.nextTick(() => order.push("tick"));
-           }, 1);
-           setTimeout(() => {
-             order.push("timer 2");
-             setImmediate(() => finish({ order }));
-           }, 1);`,
-        )}
-        process.once("beforeExit", run);
-      `,
-    });
+  async function runInADirectory(script: string) {
+    using dir = tempDir("perf-hooks-gc-vm-timeout", { "entry.js": `export default 1;`, "main.cjs": script });
     await using proc = tracked(
       Bun.spawn({ cmd: [bunExe(), "main.cjs"], env: bunEnv, cwd: String(dir), stdout: "pipe", stderr: "pipe" }),
     );
     const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
     expect(stderr).toBe("");
-    expect(JSON.parse(stdout)).toEqual({
+    return { result: stdout && JSON.parse(stdout), exitCode };
+  }
+
+  // The task is ended with its record on the way. The hand-off does not enter script with that termination pending, so
+  // the record waits and arrives after the run.
+  const afterATaskThatTheDeadlineEnds = (then: string) => `
+    ${runsIntoAVMTimeoutInANestedWait(`for (;;) {}`)}
+    function run() {
+      const keepAlive = setInterval(() => {}, 50);
+      let code;
+      const finish = result => {
+        clearInterval(keepAlive);
+        console.log(JSON.stringify({ code, ...result }));
+      };
+      new PerformanceObserver((list, observer) => {
+        if (!list.getEntries().some(isForced)) return;
+        observer.disconnect();
+        ${then}
+      }).observe({ type: "gc" });
+      code = runUntil(() => forcedCollections > 0);
+    }
+  `;
+
+  concurrent(
+    "the entry of a collection arrives after a node:vm timeout that ends the task that collected",
+    async () => {
+      const { result, exitCode } = await runInADirectory(
+        `${afterATaskThatTheDeadlineEnds(`finish({ arrived: true });`)} run();`,
+      );
+      expect(result).toEqual({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT", arrived: true });
+      expect(exitCode).toBe(0);
+    },
+  );
+
+  // Here the deadline ends the hand-off itself: the code that takes the entry of a forced collection does not return
+  // inside the run. The record that it did not take waits for the next turn. The observer of the run can have lost the
+  // immediate that calls it to the same termination, so an observer that comes after the run counts the entries.
+  concurrent("no entry is lost to a node:vm timeout that ends the code that takes it", async () => {
+    const { result, exitCode } = await runInADirectory(`
+      ${runsIntoAVMTimeoutInANestedWait(``)}
+      let endedInTheHandOff = false;
+      ${whenTheRegistryBuffersAGCEntry(`
+        if (inTheRun && isForced(items[0])) {
+          endedInTheHandOff = true;
+          for (;;) {}
+        }
+      `)}
+      const keepAlive = setInterval(() => {}, 50);
+      const inTheRunObserver = new PerformanceObserver(() => {});
+      inTheRunObserver.observe({ type: "gc" });
+      const code = runUntil(() => endedInTheHandOff);
+      Array.prototype.push = push;
+      const afterTheRun = new PerformanceObserver((list, observer) => {
+        const forced = list.getEntries().filter(isForced).length;
+        if (forced === 0) return;
+        observer.disconnect();
+        clearInterval(keepAlive);
+        console.log(JSON.stringify({ code, lost: forcedCollections - forced }));
+      });
+      afterTheRun.observe({ type: "gc" });
+      inTheRunObserver.disconnect();
+      forcedCollections++;
+      Bun.gc(true);
+    `);
+    expect(result).toEqual({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT", lost: 0 });
+    expect(exitCode).toBe(0);
+  });
+
+  // A "beforeExit" listener runs with no callback of the event loop under it. The hand-off leaves the loop as it found
+  // it: afterwards the tick and the microtask of a timer still run before the next timer.
+  concurrent("callbacks keep their order after a node:vm timeout that a hand-off met", async () => {
+    const { result, exitCode } = await runInADirectory(`
+      ${afterATaskThatTheDeadlineEnds(
+        `const order = [];
+         setTimeout(() => {
+           order.push("timer 1");
+           Promise.resolve().then(() => order.push("microtask"));
+           process.nextTick(() => order.push("tick"));
+         }, 1);
+         setTimeout(() => {
+           order.push("timer 2");
+           setImmediate(() => finish({ order }));
+         }, 1);`,
+      )}
+      process.once("beforeExit", run);
+    `);
+    expect(result).toEqual({
       code: "ERR_SCRIPT_EXECUTION_TIMEOUT",
       order: ["timer 1", "tick", "microtask", "timer 2"],
     });
