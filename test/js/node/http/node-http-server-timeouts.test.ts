@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { tls as tlsOptions } from "harness";
 import { once } from "node:events";
 import http from "node:http";
+import https from "node:https";
 import net from "node:net";
 import { pipeline, Writable } from "node:stream";
+import tls from "node:tls";
 
 // Each test opens a raw TCP socket against a server whose timeout knob is a
 // few hundred ms and waits for the server to close the connection. A small
@@ -584,13 +587,13 @@ describe.concurrent("node:http server socket setTimeout(msecs) checks", () => {
   );
 });
 
-// A write on the response is activity on the connection, like a read: Node's
-// net.Socket restarts its inactivity timer in _writeGeneric. Each probe holds
-// one request open on a raw TCP socket. The timing checks are one-sided
-// ('timeout' must not come sooner than a full period after the activity) or
-// compare against a reference timer. Timers fire in deadline order, so a slow
-// machine cannot swap the socket's timer and the reference.
-describe("node:http response writes restart the socket inactivity timeout", () => {
+// What the server writes is activity on the connection, like what it reads: Node's
+// net.Socket restarts its inactivity timer when it hands a write to the handle and
+// when a pending write completes. Each probe holds one request open on a raw TCP
+// socket. A timing check is one-sided ('timeout' must not come sooner than a full
+// period after the activity) or compares against a reference timer. Timers fire in
+// deadline order, so a slow machine cannot swap the socket's timer and the reference.
+describe("node:http server writes restart the socket inactivity timeout", () => {
   const TIMEOUT = 400;
   // The timer clock counts whole milliseconds. A server that ignores the
   // activity fires TIMEOUT / 2 early, far outside this.
@@ -617,78 +620,102 @@ describe("node:http response writes restart the socket inactivity timeout", () =
   }
   const GET = "GET / HTTP/1.1\r\nHost: a\r\n\r\n";
 
-  test.concurrent.each(["server.timeout", "res.setTimeout()", "req.setTimeout()", "socket.setTimeout()"])(
-    "%s does not fire while the response keeps writing",
-    async armedBy => {
-      let lastWriteAt = 0;
-      const { promise: firstTimeout, resolve: onFirstTimeout } = Promise.withResolvers<number>();
-      const server = http.createServer((req, res) => {
-        if (armedBy === "res.setTimeout()") res.setTimeout(TIMEOUT);
-        if (armedBy === "req.setTimeout()") req.setTimeout(TIMEOUT);
-        if (armedBy === "socket.setTimeout()") req.socket.setTimeout(TIMEOUT);
-        req.socket.on("timeout", () => onFirstTimeout(performance.now() - lastWriteAt));
-        res.writeHead(200, { "Content-Type": "text/plain" });
-        // Stream for longer than the timeout, one chunk every TIMEOUT / 8.
-        const startedAt = performance.now();
-        const interval = setInterval(() => {
-          lastWriteAt = performance.now();
-          if (lastWriteAt - startedAt < TIMEOUT * 1.5) {
-            res.write("chunk\n");
-            return;
-          }
-          clearInterval(interval);
-          res.end("done\n");
-        }, TIMEOUT / 8);
-        res.on("close", () => clearInterval(interval));
-      });
-      if (armedBy === "server.timeout") server.timeout = TIMEOUT;
-      // The idle connection is closed one more period after the response.
-      server.keepAliveTimeout = TIMEOUT;
-      server.keepAliveTimeoutBuffer = 0;
-      const port = await listen(server);
-      let client: net.Socket | undefined;
-      try {
-        client = await send(port, GET);
-        // A server that ignores writes fires within TIMEOUT / 8 of one. A machine that stalls
-        // between two writes can only make this longer.
-        expect(await Promise.race([firstTimeout, lost(client)])).toBeGreaterThanOrEqual(TIMEOUT - SLACK);
-      } finally {
-        client?.destroy();
-        server.closeAllConnections();
-        server.close();
-      }
-    },
-  );
+  test.concurrent.each([
+    "server.timeout",
+    "server.setTimeout(ms, callback)",
+    "res.setTimeout(ms)",
+    "res.setTimeout(ms, callback)",
+    "req.setTimeout(ms)",
+    "socket.setTimeout(ms)",
+  ])("%s does not fire while the response keeps writing", async armedBy => {
+    let lastWriteAt = 0;
+    const { promise: firstTimeout, resolve: onFirstTimeout } = Promise.withResolvers<number>();
+    const onTimeout = () => onFirstTimeout(performance.now() - lastWriteAt);
+    const server = http.createServer((req, res) => {
+      if (armedBy === "res.setTimeout(ms)") res.setTimeout(TIMEOUT);
+      if (armedBy === "res.setTimeout(ms, callback)") res.setTimeout(TIMEOUT, onTimeout);
+      if (armedBy === "req.setTimeout(ms)") req.setTimeout(TIMEOUT);
+      if (armedBy === "socket.setTimeout(ms)") req.socket.setTimeout(TIMEOUT);
+      req.socket.on("timeout", onTimeout);
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      // Stream for longer than the timeout, one chunk every TIMEOUT / 8.
+      const startedAt = performance.now();
+      const interval = setInterval(() => {
+        lastWriteAt = performance.now();
+        if (lastWriteAt - startedAt < TIMEOUT * 1.5) {
+          res.write("chunk\n");
+          return;
+        }
+        clearInterval(interval);
+        res.end("done\n");
+      }, TIMEOUT / 8);
+      res.on("close", () => clearInterval(interval));
+    });
+    if (armedBy === "server.timeout") server.timeout = TIMEOUT;
+    if (armedBy === "server.setTimeout(ms, callback)") server.setTimeout(TIMEOUT, onTimeout);
+    // The idle connection is closed one more period after the response.
+    server.keepAliveTimeout = TIMEOUT;
+    server.keepAliveTimeoutBuffer = 0;
+    const port = await listen(server);
+    let client: net.Socket | undefined;
+    try {
+      client = await send(port, GET);
+      // A server that ignores writes fires within TIMEOUT / 8 of one. A machine that stalls
+      // between two writes can only make this longer.
+      expect(await Promise.race([firstTimeout, lost(client)])).toBeGreaterThanOrEqual(TIMEOUT - SLACK);
+    } finally {
+      client?.destroy();
+      server.closeAllConnections();
+      server.close();
+    }
+  });
 
-  const activities: Record<string, (res: http.ServerResponse) => void> = {
-    "res.write()": res => res.write("chunk\n"),
-    "res.end()": res => res.end("done\n"),
-    "res.flushHeaders()": res => res.flushHeaders(),
-    "res.writeProcessing()": res => res.writeProcessing(),
-    "res.writeContinue()": res => res.writeContinue(),
+  // One case for each way the server puts bytes on the connection, and for each call that puts
+  // none there in Node. `before` runs when the request arrives, `act` half a period later.
+  type Act = (res: http.ServerResponse) => void;
+  const activities: Record<string, { counts: boolean; before?: Act; act: Act }> = {
+    "res.write()": { counts: true, act: res => res.write("chunk\n") },
+    "res.write('')": { counts: true, before: res => res.write("chunk\n"), act: res => res.write("") },
+    "res.end(chunk)": { counts: true, act: res => res.end("done\n") },
+    "res.end() that sends the last chunk": { counts: true, before: res => res.write("chunk\n"), act: res => res.end() },
+    "res.flushHeaders()": { counts: true, act: res => res.flushHeaders() },
+    "res.writeContinue()": { counts: true, act: res => res.writeContinue() },
+    "res.writeProcessing()": { counts: true, act: res => res.writeProcessing() },
+    "res.writeEarlyHints()": {
+      counts: true,
+      act: res => res.writeEarlyHints({ link: "</a.css>; rel=preload; as=style" }),
+    },
+    "res.writeHead()": { counts: false, act: res => res.writeHead(200) },
+    "res.end() behind a complete body": {
+      counts: false,
+      before: res => res.writeHead(200, { "Content-Length": 1 }).write("x"),
+      act: res => res.end(),
+    },
   };
 
-  test.concurrent.each(Object.keys(activities))("the inactivity period restarts at %s", async name => {
-    let activityAt = 0;
+  test.concurrent.each(Object.keys(activities))("the inactivity period after %s", async name => {
+    const { counts, before, act } = activities[name];
+    let actedAt = 0;
     let reference: ReturnType<typeof setTimeout> | undefined;
     let referenceFired = false;
     const { promise: timedOut, resolve: onTimedOut } = Promise.withResolvers<number>();
     const server = http.createServer((req, res) => {
+      before?.(res);
       setTimeout(() => {
-        // After the exact deadline (the activity plus TIMEOUT) and before the deadline of
-        // a timer that only starts over when it fires (the activity plus 1.5 * TIMEOUT).
-        reference = setTimeout(() => (referenceFired = true), TIMEOUT * 1.25);
-        activityAt = performance.now();
-        activities[name](res);
+        // The socket's timer is due one period after the last activity: after `act` when it
+        // counts, after the request when it does not. The reference lies between the two.
+        reference = setTimeout(() => (referenceFired = true), TIMEOUT * (counts ? 1.25 : 0.75));
+        actedAt = performance.now();
+        act(res);
       }, TIMEOUT / 2);
     });
     server.timeout = TIMEOUT;
     // No keep-alive timeout: server.timeout stays armed after res.end().
     server.keepAliveTimeout = 0;
     server.on("timeout", socket => {
-      // Only on a machine that stalls past the timeout before the activity runs. The
-      // activity then starts the timer again, and the next 'timeout' is the one measured.
-      if (activityAt === 0) return;
+      // Only on a machine that stalls past the timeout before `act` runs. A counted one
+      // then starts the timer again, and the next 'timeout' is the one measured.
+      if (actedAt === 0) return;
       onTimedOut(performance.now());
       socket.destroy();
     });
@@ -696,8 +723,8 @@ describe("node:http response writes restart the socket inactivity timeout", () =
     let client: net.Socket | undefined;
     try {
       client = await send(port, GET);
-      const quietFor = (await Promise.race([timedOut, lost(client)])) - activityAt;
-      expect(quietFor).toBeGreaterThanOrEqual(TIMEOUT - SLACK);
+      const quietFor = (await Promise.race([timedOut, lost(client)])) - actedAt;
+      if (counts) expect(quietFor).toBeGreaterThanOrEqual(TIMEOUT - SLACK);
       expect(referenceFired).toBe(false);
     } finally {
       clearTimeout(reference);
@@ -741,34 +768,25 @@ describe("node:http response writes restart the socket inactivity timeout", () =
     }
   });
 
-  // Writes that are no activity in Node: write_() drops a write to a response without a body
-  // and validates before it sends anything, and a write to a peer that stopped reading only
-  // backs up. A server that ignores every write passes these too. They guard against counting
-  // such a write, which keeps the connection of a handler that writes forever open.
-  const noActivity: Record<string, { request: string; stalled?: boolean; setup: (res: http.ServerResponse) => void }> =
-    {
-      "a write that a HEAD response discards": {
-        request: "HEAD / HTTP/1.1\r\nHost: a\r\n\r\n",
-        setup: res => res.writeHead(200, { "Content-Type": "text/event-stream" }),
-      },
-      "a write that throws": {
-        request: GET,
-        // The implicit header is invalid, so every write throws before it sends anything.
-        setup: res => (res.statusCode = 1000),
-      },
-      "a write to a peer that stopped reading": {
-        request: GET,
-        stalled: true,
-        // More than the kernel buffers take: this write and every later one back up.
-        setup: res => res.write(Buffer.alloc(16 * 1024 * 1024, "a")),
-      },
-    };
+  // Writes that put nothing on the connection in Node: write_() drops a chunk for a response
+  // without a body, and it validates before it sends anything. A server that ignores every
+  // write passes these too. They guard against counting such a write, which keeps the
+  // connection of a handler that writes forever open.
+  const discarded: Record<string, { request: string; setup: Act }> = {
+    "a HEAD response": {
+      request: "HEAD / HTTP/1.1\r\nHost: a\r\n\r\n",
+      setup: res => res.writeHead(200, { "Content-Type": "text/event-stream" }),
+    },
+    "a 204 response": { request: GET, setup: res => res.writeHead(204) },
+    // The implicit header is invalid, so every write throws before it sends anything.
+    "a response whose head is invalid": { request: GET, setup: res => (res.statusCode = 1000) },
+  };
 
-  test.concurrent.each(Object.keys(noActivity))("%s does not restart the timer", async name => {
+  test.concurrent.each(Object.keys(discarded))("writes to %s do not restart the timer", async name => {
     let reference: ReturnType<typeof setTimeout> | undefined;
     const { promise: settled, resolve: onSettled } = Promise.withResolvers<string>();
     const server = http.createServer((req, res) => {
-      noActivity[name].setup(res);
+      discarded[name].setup(res);
       const interval = setInterval(() => {
         try {
           res.write("data: ping\n\n");
@@ -786,7 +804,7 @@ describe("node:http response writes restart the socket inactivity timeout", () =
     const port = await listen(server);
     let client: net.Socket | undefined;
     try {
-      client = await send(port, noActivity[name].request, noActivity[name].stalled);
+      client = await send(port, discarded[name].request);
       expect(await Promise.race([settled, lost(client)])).toBe("'timeout'");
     } finally {
       clearTimeout(reference);
@@ -796,47 +814,140 @@ describe("node:http response writes restart the socket inactivity timeout", () =
     }
   });
 
-  test.concurrent("a request body chunk after a write moved the deadline gets a full period", async () => {
-    // The write at 0.6 * TIMEOUT moves the deadline from TIMEOUT to 1.6 * TIMEOUT, and the
-    // body chunk arrives between the two. This guards how the deadline moves, not the bug.
-    // A server that ignores writes passes too: the 'timeout' at TIMEOUT is swallowed below
-    // and the chunk restarts the spent timer. It fails when the expiry puts a new, shorter
-    // timer in the slot, because the chunk then refreshes only 0.6 * TIMEOUT.
-    let chunkSentAt = 0;
-    let chunkReceived = false;
+  test.concurrent("a peer that stops reading is timed out at the second expiry", async () => {
+    let pendingSince = 0;
+    let reference: ReturnType<typeof setTimeout> | undefined;
+    let referenceFired = false;
     const { promise: timedOut, resolve: onTimedOut } = Promise.withResolvers<number>();
-    const { promise: wrote, resolve: onWrote } = Promise.withResolvers<void>();
     const server = http.createServer((req, res) => {
-      req.on("data", chunk => {
-        if (chunk.toString("latin1") === "late") chunkReceived = true;
-      });
-      setTimeout(() => {
-        res.write("chunk\n");
-        onWrote();
-      }, TIMEOUT * 0.6);
+      // More than the kernel buffers take, so this write stays pending and every later one queues behind it.
+      res.write(Buffer.alloc(16 * 1024 * 1024, "a"));
+      pendingSince = performance.now();
+      const interval = setInterval(() => res.write("data: ping\n\n"), TIMEOUT / 8);
+      res.on("close", () => clearInterval(interval));
+      // Long after the second expiry. A server that counts the queued writes never gets there.
+      reference = setTimeout(() => (referenceFired = true), TIMEOUT * 6);
     });
     server.timeout = TIMEOUT;
     server.on("timeout", socket => {
-      // Before the chunk: a server that ignores writes, or a machine that stalls until the
-      // moved deadline has passed. The chunk then starts the timer again.
-      if (!chunkReceived) return;
       onTimedOut(performance.now());
       socket.destroy();
     });
     const port = await listen(server);
     let client: net.Socket | undefined;
     try {
-      client = await send(port, "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 100\r\n\r\nearly");
-      const connectionLost = lost(client);
-      await Promise.race([wrote, connectionLost]);
-      setTimeout(() => {
-        chunkSentAt = performance.now();
-        client!.write("late");
-      }, TIMEOUT * 0.7);
-      const quietFor = (await Promise.race([timedOut, connectionLost])) - chunkSentAt;
-      expect(quietFor).toBeGreaterThanOrEqual(TIMEOUT - SLACK);
+      client = await send(port, GET, true);
+      // Node holds the first 'timeout' back, because the write was pending and the kernel had taken a part of it.
+      const quietFor = (await Promise.race([timedOut, lost(client)])) - pendingSince;
+      expect(quietFor).toBeGreaterThanOrEqual(2 * TIMEOUT - SLACK);
+      expect(referenceFired).toBe(false);
     } finally {
+      clearTimeout(reference);
       client?.destroy();
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+});
+
+// The progress of a write that is pending is activity too: Node looks at the write queue when the
+// timer fires. Each case moves 20 MB, so these run one at a time and not beside the timing checks above.
+describe("node:http: a write that drains slowly holds the socket inactivity timeout back", () => {
+  const TIMEOUT = 400;
+  // The reader takes 25 MB a second in steps of 20 ms, so the body drains for longer than TIMEOUT
+  // whatever the kernel buffers hold.
+  const BODY = Buffer.alloc(20 * 1024 * 1024, "a");
+  function readSlowly(client: net.Socket) {
+    let budget = 0;
+    let received = 0;
+    let head = -1;
+    const { promise, resolve, reject } = Promise.withResolvers<number>();
+    client.on("data", chunk => {
+      if (head === -1) {
+        const end = chunk.indexOf("\r\n\r\n");
+        if (end !== -1) head = received + end + 4;
+      }
+      received += chunk.length;
+      budget -= chunk.length;
+      if (budget <= 0) client.pause();
+    });
+    const pump = setInterval(() => {
+      budget = 500 * 1024;
+      client.resume();
+    }, 20);
+    client.on("error", reject);
+    // The server closes the connection behind the body.
+    client.on("close", () => {
+      clearInterval(pump);
+      resolve(received - head);
+    });
+    return promise;
+  }
+
+  const responses: Record<string, { secure?: boolean; respond: (res: http.ServerResponse) => void }> = {
+    "res.end()": { respond: res => res.end(BODY) },
+    "res.end() over https": { secure: true, respond: res => res.end(BODY) },
+    "res.write()": {
+      respond: res => {
+        if (res.write(BODY)) res.end();
+        else res.once("drain", () => res.end());
+      },
+    },
+  };
+
+  test.each(Object.keys(responses))("no 'timeout' while a slow reader drains one %s", async name => {
+    const { secure, respond } = responses[name];
+    let timeouts = 0;
+    const handler = (req: http.IncomingMessage, res: http.ServerResponse) => {
+      res.writeHead(200, { "Content-Length": BODY.length, "Connection": "close" });
+      respond(res);
+    };
+    const server = secure ? https.createServer(tlsOptions, handler) : http.createServer(handler);
+    server.timeout = TIMEOUT;
+    server.on("timeout", socket => {
+      timeouts++;
+      socket.destroy();
+    });
+    const port = await listen(server);
+    const client = secure
+      ? tls.connect({ port, host: "127.0.0.1", rejectUnauthorized: false })
+      : net.connect(port, "127.0.0.1");
+    try {
+      const body = readSlowly(client);
+      await once(client, secure ? "secureConnect" : "connect");
+      client.write("GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+      expect({ body: await body, timeouts }).toEqual({ body: BODY.length, timeouts: 0 });
+    } finally {
+      client.destroy();
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  test("no 'timeout' while a slow reader drains one socket.write() on a CONNECT tunnel", async () => {
+    let timeouts = 0;
+    let drained = false;
+    const server = http.createServer();
+    server.on("connect", (req, socket) => {
+      // Node takes its 'timeout' listener off the socket of a tunnel, and the timer stays armed.
+      // Behind the last byte the connection is idle until the reader has caught up.
+      socket.on("timeout", () => drained || timeouts++);
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      socket.write(BODY, () => {
+        drained = true;
+        socket.end();
+      });
+    });
+    server.timeout = TIMEOUT;
+    const port = await listen(server);
+    const client = net.connect(port, "127.0.0.1");
+    try {
+      const body = readSlowly(client);
+      await once(client, "connect");
+      client.write("CONNECT a:443 HTTP/1.1\r\nHost: a:443\r\n\r\n");
+      expect({ body: await body, timeouts }).toEqual({ body: BODY.length, timeouts: 0 });
+    } finally {
+      client.destroy();
       server.closeAllConnections();
       server.close();
     }
