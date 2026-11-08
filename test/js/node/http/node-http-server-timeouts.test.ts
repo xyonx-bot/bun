@@ -670,12 +670,16 @@ describe("node:http server writes restart the socket inactivity timeout", () => 
     }
   });
 
-  // Between two requests the keep-alive timeout takes the place of the socket's timer, with
-  // another period here, and the next request arms the first one again.
-  test.concurrent.each(["server.timeout", "res.setTimeout(ms)"])(
-    "%s lets each response on a kept-alive connection stream past it, then keepAliveTimeout closes the connection",
-    async armedBy => {
-      const KEEP_ALIVE = TIMEOUT * 1.5;
+  // Between two requests the keep-alive timeout takes the place of the socket's timer, and the
+  // next request arms the first one again. With the same period the two share one timer.
+  test.concurrent.each([
+    ["server.timeout", 1.5],
+    ["res.setTimeout(ms)", 1.5],
+    ["server.timeout", 1],
+  ])(
+    "%s lets each response on a kept-alive connection stream past it, then a keepAliveTimeout %s times as long closes the connection",
+    async (armedBy, factor) => {
+      const KEEP_ALIVE = TIMEOUT * factor;
       let lastWriteAt = 0;
       let timedOutAt = 0;
       let responses = 0;

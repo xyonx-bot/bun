@@ -1630,8 +1630,6 @@ function onSocketTimeoutTimerExpired(socket) {
   // like net.Socket.
   if (socket[kKeepAliveTimeoutSet]) {
     socket[kSocketTimeoutTimer] = undefined;
-    // The native connection must not hold a fired timer that is gone from here: a write would start it again.
-    socket[kHandle]?.setInactivityTimer(undefined);
   }
   socket._onTimeout();
 }
@@ -1969,12 +1967,8 @@ function getNodeHTTPServerSocket() {
     _onTimeout() {
       const handle = this[kHandle];
       // A write in progress holds 'timeout' back once: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L596-L611
-      // Not the keep-alive one: its fired timer is gone from the slot that _unrefTimer() refreshes.
-      if (
-        !this[kKeepAliveTimeoutSet] &&
-        (this.writableLength > 0 || handle?.response?.bufferedAmount > 0) &&
-        handle?.holdTimeoutBackOnce()
-      ) {
+      // Never the keep-alive one, whose timer the native connection does not have.
+      if ((this.writableLength > 0 || handle?.response?.bufferedAmount > 0) && handle?.holdTimeoutBackOnce()) {
         this._unrefTimer();
         return;
       }
@@ -2212,8 +2206,6 @@ function getNodeHTTPServerSocket() {
         // Not the keep-alive timer, which nothing writes under: a default server would pay a refresh per write.
         if (!this[kKeepAliveTimeoutSet]) {
           this[kHandle]?.setInactivityTimer(this[kSocketTimeoutTimer]);
-        } else if (existingTimer) {
-          this[kHandle]?.setInactivityTimer(undefined);
         }
         if (callback !== undefined) {
           validateFunction(callback, "callback");
@@ -2767,6 +2759,8 @@ function onResponseFinishHandleSocket(server, socket, res) {
     // budget if the timer fires early, so the socket still closes after
     // exactly `total` ms of idle.
     const timer = socket[kSocketTimeoutTimer];
+    // The native connection has the timer of a timeout that was armed for this request. Nothing writes under the keep-alive one.
+    if (socket.timeout !== 0) socket[kHandle]?.setInactivityTimer(undefined);
     // Before setTimeout(), which hands any other timer to the native connection.
     socket[kKeepAliveTimeoutSet] = true;
     if (timer !== undefined && timer._idleTimeout === total) {
