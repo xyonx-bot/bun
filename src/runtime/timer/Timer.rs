@@ -699,6 +699,15 @@ pub(crate) fn clear_interval_export(global: &JSGlobalObject, id: JSValue) -> JsR
     All::clear_interval(global, id)
 }
 
+/// `timer.refresh()` without a call into JavaScript, for the `node:http` connection that holds the `Timeout` of its socket inactivity timeout.
+// HOST_EXPORT(Bun__Timer__refreshTimeout, c)
+pub(crate) fn refresh_timeout_export(global: &JSGlobalObject, timer: JSValue) {
+    if let Some(timeout) = TimeoutObject::from_js(timer) {
+        // SAFETY: `timer` is the wrapper of `timeout`, and the caller keeps it alive.
+        let _ = unsafe { (*timeout).internals.do_refresh(global, timer) };
+    }
+}
+
 pub(crate) mod internal_bindings {
     use super::*;
 

@@ -65,9 +65,13 @@ public:
     unsigned heldWriteAwaitsDrain : 1 = 0;
     /* Set by onClose() for the peerEnded / closeError getters: the peer's FIN, the error of a failed read. */
     unsigned peer_ended : 1 = 0;
+    /* holdTimeoutBackOnce() said yes, and nothing has refreshed m_inactivityTimer since. */
+    unsigned timeoutHeldBack : 1 = 0;
     int closeReadError = 0;
     /* Whether the connection closed before the kernel had taken everything, also after an upgrade to a WebSocket. */
     std::optional<bool> closedWithUnsentData;
+    /* Guards m_pipelinedResponses. It is here because it fits in the padding behind closedWithUnsentData. */
+    mutable WTF::Lock m_pipelinedResponsesLock;
     /* Tunnel bytes that onData() queued for JS in tasks that have not run yet. */
     size_t queuedTunnelBytes = 0;
     const char* peerCertVerifyErrorCode = nullptr;
@@ -103,6 +107,21 @@ public:
      * this connection has exceeded server.headersTimeout / server.requestTimeout
      * (ms; 0 disables a check). Reports a given message at most once. */
     bool isRequestTimedOut(uint64_t headersTimeoutMs, uint64_t requestTimeoutMs);
+
+    /* node:http server compat: JS hands over the Timeout of an armed socket inactivity timeout (socket.setTimeout,
+     * server.timeout; not the keep-alive one), or takes it back with null. Each write of the server and the progress
+     * of a pending write then refresh it, like net.Socket in Node. */
+    void setInactivityTimer(JSC::VM& vm, JSC::JSObject* timer);
+    void touchInactivityTimer();
+    /* For a timer that fired with a write still pending, where Node looks at writeQueueSize. True once, then false until something refreshes the timer. */
+    bool holdTimeoutBackOnce()
+    {
+        if (!m_inactivityTimer || timeoutHeldBack) {
+            return false;
+        }
+        timeoutHeldBack = true;
+        return true;
+    }
 
     /* node:http server compat - HTTP/1.1 pipelining. Responses for requests
      * that were parsed while an earlier response on this connection was still
@@ -180,11 +199,11 @@ public:
     mutable JSC::WriteBarrier<JSC::JSObject> m_remoteAddress;
     mutable JSC::WriteBarrier<JSC::JSObject> m_localAddress;
     mutable JSC::WriteBarrier<JSC::JSObject> m_duplex;
+    mutable JSC::WriteBarrier<JSC::JSObject> m_inactivityTimer;
 
-    /* Queued pipelined responses (see appendPipelinedResponse). The lock keeps
-     * mutation on the JS thread coherent with the concurrent GC marker walking
+    /* Queued pipelined responses (see appendPipelinedResponse). m_pipelinedResponsesLock
+     * keeps mutation on the JS thread coherent with the concurrent GC marker walking
      * the vector in visitChildren. */
-    mutable WTF::Lock m_pipelinedResponsesLock;
     mutable WTF::Vector<JSC::WriteBarrier<JSNodeHTTPResponse>, 2> m_pipelinedResponses;
 
     DECLARE_INFO;

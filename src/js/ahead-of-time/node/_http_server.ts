@@ -1,5 +1,5 @@
 // What the compiler reads in place of src/js/node/_http_server.ts, which `bun run` evaluates. The two do the same.
-// Written against that file with the SHA-256 ff5fd0cf3ffd5e9a3fb246c83dbbefe854e635a64472500199657149d7819c82.
+// Written against that file with the SHA-256 e21f565802cfde6b56aca780222ebdf2ae1ef8477f298308f08edc22e5d16ea1.
 // When that file changes, bring the change here and write the new hash: test/internal/second-texts-of-modules.test.ts.
 
 // Hardcoded module "node:_http_server"
@@ -2336,6 +2336,8 @@ function onSocketTimeoutTimerExpired(socket: $Node.HttpServerSocket) {
   if (socket[kKeepAliveTimeoutSet]) {
     socket[kSocketTimeoutTimer] = undefined;
     socket.$armedTimeout = 0;
+    // The native connection must not hold a fired timer that is gone from here: a write would start it again.
+    socket[kHandle]?.setInactivityTimer(undefined);
   }
   socket._onTimeout();
 }
@@ -2741,11 +2743,13 @@ function getNodeHTTPServerSocket(): NodeHTTPServerSocketConstructor {
 
     _onTimeout() {
       const handle = this[kHandle];
-      const response = handle?.response;
-      // If there is a response, and it has pending data,
-      // we suppress the timeout because a write is in progress.
-      if (response && response.writableLength! > 0) {
-        // Re-arm so the timeout still fires once the write actually stalls.
+      // A write in progress holds 'timeout' back once: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L596-L611
+      // Not the keep-alive one: its fired timer is gone from the slot that _unrefTimer() refreshes.
+      if (
+        !this[kKeepAliveTimeoutSet] &&
+        (this.writableLength > 0 || handle?.response?.bufferedAmount! > 0) &&
+        handle?.holdTimeoutBackOnce()
+      ) {
         this._unrefTimer();
         return;
       }
@@ -2968,22 +2972,31 @@ function getNodeHTTPServerSocket(): NodeHTTPServerSocketConstructor {
           clearTimeout(existingTimer);
           this[kSocketTimeoutTimer] = undefined;
           this.$armedTimeout = 0;
+          this[kHandle]?.setInactivityTimer(undefined);
         }
         if (callback !== undefined) {
           validateFunction(callback, "callback");
           this.removeListener("timeout", callback);
         }
       } else {
+        let timer: $Node.Timeout | undefined = existingTimer;
         // The keep-alive cycle re-arms the same idle interval after every
         // response: refresh the existing timer instead of clear+allocate.
         if (existingTimer && (this.$armedTimeout >= 0 ? this.$armedTimeout : existingTimer._idleTimeout) === msecs) {
           existingTimer.refresh();
         } else {
           if (existingTimer) clearTimeout(existingTimer);
-          const timer: $Node.Timeout = setTimeout(onSocketTimeoutTimerExpired, msecs, this);
+          timer = setTimeout(onSocketTimeoutTimerExpired, msecs, this);
           timer.unref();
           this[kSocketTimeoutTimer] = timer;
           this.$armedTimeout = msecs;
+        }
+        // The native connection refreshes it on each write of a response: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L1019
+        // Not the keep-alive timer, which nothing writes under: a default server would pay a refresh per write.
+        if (!this[kKeepAliveTimeoutSet]) {
+          this[kHandle]?.setInactivityTimer(timer);
+        } else if (existingTimer) {
+          this[kHandle]?.setInactivityTimer(undefined);
         }
         if (callback !== undefined) {
           validateFunction(callback, "callback");
@@ -3881,13 +3894,14 @@ function onResponseFinishHandleSocket(
     // idle period started; onSocketTimeoutTimerExpired grants the remaining
     // budget if the timer fires early, so the socket still closes after
     // exactly `total` ms of idle.
+    // Before setTimeout(), which hands any other timer to the native connection.
+    socket[kKeepAliveTimeoutSet] = true;
     if (socket.$armedTimeout === total || isArmedWith(socket, total)) {
       socket.timeout = total;
     } else {
       socket.setTimeout(total);
     }
     socket[kKeepAliveIdleStart] = DateNow();
-    socket[kKeepAliveTimeoutSet] = true;
   }
 }
 
@@ -5067,13 +5081,14 @@ const finishConnection = function onResponseFinishHandleSocket(
     if (parser != null && parser.incoming === req && req.readableEnded) parser.incoming = null;
   }
   const idleTimeout = exchange.idleTimeout;
+  // Before setTimeout(), which hands any other timer to the native connection.
+  socket[kKeepAliveTimeoutSet] = true;
   if (socket.$armedTimeout === idleTimeout || isArmedWith(socket, idleTimeout)) socket.timeout = idleTimeout;
   else {
     ("unlikely");
     socket.setTimeout(idleTimeout);
   }
   socket[kKeepAliveIdleStart] = DateNow();
-  socket[kKeepAliveTimeoutSet] = true;
   if (exchange.detachedFrom === null) {
     if (socket._httpMessage === res) {
       socket[kCloseCallback] = undefined;

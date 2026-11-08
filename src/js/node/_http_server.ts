@@ -1630,6 +1630,8 @@ function onSocketTimeoutTimerExpired(socket) {
   // like net.Socket.
   if (socket[kKeepAliveTimeoutSet]) {
     socket[kSocketTimeoutTimer] = undefined;
+    // The native connection must not hold a fired timer that is gone from here: a write would start it again.
+    socket[kHandle]?.setInactivityTimer(undefined);
   }
   socket._onTimeout();
 }
@@ -1966,11 +1968,13 @@ function getNodeHTTPServerSocket() {
 
     _onTimeout() {
       const handle = this[kHandle];
-      const response = handle?.response;
-      // If there is a response, and it has pending data,
-      // we suppress the timeout because a write is in progress.
-      if (response && response.writableLength > 0) {
-        // Re-arm so the timeout still fires once the write actually stalls.
+      // A write in progress holds 'timeout' back once: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L596-L611
+      // Not the keep-alive one: its fired timer is gone from the slot that _unrefTimer() refreshes.
+      if (
+        !this[kKeepAliveTimeoutSet] &&
+        (this.writableLength > 0 || handle?.response?.bufferedAmount > 0) &&
+        handle?.holdTimeoutBackOnce()
+      ) {
         this._unrefTimer();
         return;
       }
@@ -2187,21 +2191,30 @@ function getNodeHTTPServerSocket() {
         if (existingTimer) {
           clearTimeout(existingTimer);
           this[kSocketTimeoutTimer] = undefined;
+          this[kHandle]?.setInactivityTimer(undefined);
         }
         if (callback !== undefined) {
           validateFunction(callback, "callback");
           this.removeListener("timeout", callback);
         }
       } else {
+        let timer = existingTimer;
         // The keep-alive cycle re-arms the same idle interval after every
         // response: refresh the existing timer instead of clear+allocate.
         if (existingTimer && existingTimer._idleTimeout === msecs) {
           existingTimer.refresh();
         } else {
           if (existingTimer) clearTimeout(existingTimer);
-          const timer = setTimeout(onSocketTimeoutTimerExpired, msecs, this);
+          timer = setTimeout(onSocketTimeoutTimerExpired, msecs, this);
           timer.unref();
           this[kSocketTimeoutTimer] = timer;
+        }
+        // The native connection refreshes it on each write of a response: https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L1019
+        // Not the keep-alive timer, which nothing writes under: a default server would pay a refresh per write.
+        if (!this[kKeepAliveTimeoutSet]) {
+          this[kHandle]?.setInactivityTimer(timer);
+        } else if (existingTimer) {
+          this[kHandle]?.setInactivityTimer(undefined);
         }
         if (callback !== undefined) {
           validateFunction(callback, "callback");
@@ -2755,13 +2768,14 @@ function onResponseFinishHandleSocket(server, socket, res) {
     // budget if the timer fires early, so the socket still closes after
     // exactly `total` ms of idle.
     const timer = socket[kSocketTimeoutTimer];
+    // Before setTimeout(), which hands any other timer to the native connection.
+    socket[kKeepAliveTimeoutSet] = true;
     if (timer !== undefined && timer._idleTimeout === total) {
       socket.timeout = total;
     } else {
       socket.setTimeout(total);
     }
     socket[kKeepAliveIdleStart] = DateNow();
-    socket[kKeepAliveTimeoutSet] = true;
   }
 }
 
