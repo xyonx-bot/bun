@@ -737,7 +737,9 @@ describe("node:http server writes restart the socket inactivity timeout", () => 
   test.concurrent("a write after a 'timeout' that kept the socket open starts the timer again", async () => {
     const events: string[] = [];
     let writeAt = 0;
-    const { promise: timedOutAgain, resolve: onTimedOutAgain } = Promise.withResolvers<number>();
+    let timedOutAgainAt = 0;
+    let reference: ReturnType<typeof setTimeout> | undefined;
+    const { promise: settled, resolve: onSettled } = Promise.withResolvers<void>();
     let response: http.ServerResponse | undefined;
     const server = http.createServer((req, res) => {
       response = res;
@@ -746,22 +748,31 @@ describe("node:http server writes restart the socket inactivity timeout", () => 
     server.timeout = TIMEOUT;
     server.on("timeout", () => {
       events.push("timeout");
-      if (writeAt !== 0) return onTimedOutAgain(performance.now());
+      if (writeAt !== 0) {
+        timedOutAgainAt = performance.now();
+        return onSettled();
+      }
       // A listener keeps the socket open. Nothing reads or writes until this write.
       setTimeout(() => {
         events.push("write");
         writeAt = performance.now();
         response!.write("late\n");
+        // Long after the second 'timeout'. A server that ignores the write never fires again.
+        reference = setTimeout(() => {
+          events.push("the reference timer");
+          onSettled();
+        }, TIMEOUT * 3);
       }, TIMEOUT / 4);
     });
     const port = await listen(server);
     let client: net.Socket | undefined;
     try {
       client = await send(port, GET);
-      const quietFor = (await Promise.race([timedOutAgain, lost(client)])) - writeAt;
+      await Promise.race([settled, lost(client)]);
       expect(events).toEqual(["timeout", "write", "timeout"]);
-      expect(quietFor).toBeGreaterThanOrEqual(TIMEOUT - SLACK);
+      expect(timedOutAgainAt - writeAt).toBeGreaterThanOrEqual(TIMEOUT - SLACK);
     } finally {
+      clearTimeout(reference);
       client?.destroy();
       server.closeAllConnections();
       server.close();
