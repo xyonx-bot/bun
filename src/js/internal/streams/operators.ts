@@ -4,21 +4,19 @@ const { validateAbortSignal, validateFunction, validateInteger, validateObject }
 const { kWeakHandler, resistStopPropagation } = require("internal/shared");
 const { finished } = require("internal/streams/end-of-stream");
 
+const MathFloor = Math.floor;
+const PromiseResolve = Promise.$resolve.bind(Promise);
+const PromiseReject = Promise.$reject.bind(Promise);
 const PromisePrototypeThen = $Promise.prototype.$then;
+const ArrayPrototypePush = Array.prototype.push;
+const NumberIsNaN = Number.isNaN;
+const ObjectDefineProperty = Object.defineProperty;
 
 const kEmpty = Symbol("kEmpty");
 const kEof = Symbol("kEof");
 
 type Operator = $Node.OperatorCallback<unknown>;
 type Options = $Node.OperatorOptions | null | undefined;
-
-// Math.floor without a read of Math, which user code can replace before this module loads.
-function floor(value: number): number {
-  const number = +value;
-  const fraction = number % 1;
-  if (fraction !== fraction || fraction === 0) return number;
-  return fraction < 0 ? number - fraction - 1 : number - fraction;
-}
 
 function map(this: $Node.Readable, fn: Operator, options?: Options) {
   validateFunction(fn, "fn");
@@ -31,12 +29,12 @@ function map(this: $Node.Readable, fn: Operator, options?: Options) {
 
   let concurrency = 1;
   if (options?.concurrency != null) {
-    concurrency = floor(options.concurrency);
+    concurrency = MathFloor(options.concurrency);
   }
 
   let highWaterMark = concurrency - 1;
   if (options?.highWaterMark != null) {
-    highWaterMark = floor(options.highWaterMark);
+    highWaterMark = MathFloor(options.highWaterMark);
   }
 
   validateInteger(concurrency, "options.concurrency", 1);
@@ -90,9 +88,9 @@ function map(this: $Node.Readable, fn: Operator, options?: Options) {
               continue;
             }
 
-            val = Promise.$resolve(val);
+            val = PromiseResolve(val);
           } catch (err) {
-            val = Promise.$reject(err);
+            val = PromiseReject(err);
           }
 
           cnt += 1;
@@ -113,7 +111,7 @@ function map(this: $Node.Readable, fn: Operator, options?: Options) {
         }
         queue.push(kEof);
       } catch (err) {
-        const val = Promise.$reject(err);
+        const val = PromiseReject(err);
         PromisePrototypeThen.$call(val, afterItemProcessed, onCatch);
         queue.push(val);
       } finally {
@@ -282,7 +280,7 @@ async function toArray(this: $Node.Readable, options?: Options) {
     if (options?.signal?.aborted) {
       throw $makeAbortError(undefined, { cause: options.signal.reason });
     }
-    $arrayPush(result, val);
+    ArrayPrototypePush.$call(result, val);
   }
   return result;
 }
@@ -301,7 +299,7 @@ function toIntegerOrInfinity(number: number) {
   // We coerce here to align with the spec
   // https://github.com/tc39/proposal-iterator-helpers/issues/169
   number = Number(number);
-  if (number !== number) {
+  if (NumberIsNaN(number)) {
     return 0;
   }
   if (number < 0) {
@@ -333,6 +331,7 @@ function drop(this: $Node.Readable, number: number, options?: Options) {
     }
   }.$call(this);
 }
+ObjectDefineProperty(drop, "length", { value: 1 });
 
 function take(this: $Node.Readable, number: number, options?: Options) {
   if (options != null) {
@@ -362,6 +361,7 @@ function take(this: $Node.Readable, number: number, options?: Options) {
     }
   }.$call(this);
 }
+ObjectDefineProperty(take, "length", { value: 1 });
 
 export default {
   streamReturningOperators: {
