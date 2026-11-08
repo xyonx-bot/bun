@@ -2481,7 +2481,7 @@ declare namespace $Node {
     closeIfIdle(): boolean;
     /** Hands over the `Timeout` of an armed socket inactivity timeout, or takes it back. While the connection holds it, the writes of the server and their progress refresh it. */
     setInactivityTimer(timer: Timeout | undefined): void;
-    /** For a timer that fired while a write is pending. True once, then false until a write or its progress refreshes the timer. */
+    /** For a timer that fired while a write is pending. True once, then false until a write or its progress refreshes the timer. Always false while the connection holds no timer, as under the keep-alive timeout. */
     holdTimeoutBackOnce(): boolean;
   }
 

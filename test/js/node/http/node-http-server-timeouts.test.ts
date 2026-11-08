@@ -903,8 +903,11 @@ describe("node:http server writes restart the socket inactivity timeout", () => 
       pendingSince = performance.now();
       const interval = setInterval(() => res.write("data: ping\n\n"), TIMEOUT / 8);
       res.on("close", () => clearInterval(interval));
-      // Long after the second expiry. A server that counts the queued writes never gets there.
-      reference = setTimeout(() => (referenceFired = true), TIMEOUT * 6);
+      // Long after the second expiry. A server that counts the queued writes never times out.
+      reference = setTimeout(() => {
+        referenceFired = true;
+        onTimedOut(performance.now());
+      }, TIMEOUT * 6);
     });
     server.timeout = TIMEOUT;
     server.on("timeout", socket => {
@@ -929,18 +932,23 @@ describe("node:http server writes restart the socket inactivity timeout", () => 
 });
 
 // The progress of a write that is pending is activity too: Node looks at the write queue when the
-// timer fires. Each case moves 20 MB, so these run one at a time and not beside the timing checks above.
+// timer fires. Each case moves 24 MB, so these run one at a time and not beside the timing checks above.
 describe("node:http: a write that drains slowly holds the socket inactivity timeout back", () => {
   const TIMEOUT = 400;
-  // The reader takes 25 MB a second in steps of 20 ms, so the body drains for longer than TIMEOUT
-  // whatever the kernel buffers hold.
-  const BODY = Buffer.alloc(20 * 1024 * 1024, "a");
+  const BODY = Buffer.alloc(24 * 1024 * 1024, "a");
+  // A server that holds 'timeout' back once, and does not see the bytes leave, fires at the second
+  // expiry. For longer than that the reader takes 10 MB a second, 200 KB every 20 ms: too little,
+  // with what the kernel buffers hold, for the write to complete. Then it takes the rest.
+  const SLOW_FOR = TIMEOUT * 2.75;
+  const STEP = 200 * 1024;
   function readSlowly(client: net.Socket) {
     let budget = 0;
     let received = 0;
     let head = -1;
+    let startedAt = 0;
     const { promise, resolve, reject } = Promise.withResolvers<number>();
     client.on("data", chunk => {
+      startedAt ||= performance.now();
       if (head === -1) {
         const end = chunk.indexOf("\r\n\r\n");
         if (end !== -1) head = received + end + 4;
@@ -950,8 +958,10 @@ describe("node:http: a write that drains slowly holds the socket inactivity time
       if (budget <= 0) client.pause();
     });
     const pump = setInterval(() => {
-      budget = 500 * 1024;
-      client.resume();
+      // A chunk that was larger than the step is paid off before the next one.
+      if (startedAt === 0 || performance.now() - startedAt < SLOW_FOR) budget = Math.min(budget + STEP, STEP);
+      else budget = Infinity;
+      if (budget > 0) client.resume();
     }, 20);
     client.on("error", reject);
     // The server closes the connection behind the body.
