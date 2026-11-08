@@ -890,13 +890,6 @@ private:
         return s;
     }
 
-    /* node:http compat: bytes of a pending write left, which is activity for an armed socket inactivity timeout. A writable event that moves nothing is none. */
-    static void noteNodeHttpWriteProgress(us_socket_t *s, HttpResponseData<SSL> *httpResponseData, size_t flushed) {
-        if (flushed > 0 && (httpResponseData->state & HttpResponseData<SSL>::HTTP_NODE_TRACKS_ACTIVITY)) [[unlikely]] {
-            Bun__NodeHTTP__touchInactivityTimer(SSL, s);
-        }
-    }
-
     template <bool IsNodeHttp>
     static us_socket_t *onWritable(us_socket_t *s) {
         auto *asyncSocket = reinterpret_cast<AsyncSocket<SSL> *>(s);
@@ -908,7 +901,10 @@ private:
             /* Try to flush pending data from the socket's buffer to the network */
             size_t flushed = asyncSocket->flush();
             if constexpr (IsNodeHttp) {
-                noteNodeHttpWriteProgress(s, httpResponseData, flushed);
+                /* node:http compat: bytes of a pending write left, which is activity for an armed socket inactivity timeout. */
+                if (flushed > 0 && (httpResponseData->state & HttpResponseData<SSL>::HTTP_NODE_TRACKS_ACTIVITY)) [[unlikely]] {
+                    Bun__NodeHTTP__touchInactivityTimer(SSL, s);
+                }
             }
             /* Check if there's still data waiting to be sent after flush attempt */
             if (asyncSocket->getBufferedAmount() > 0) {
@@ -982,10 +978,7 @@ private:
         }
 
         /* Drain any socket buffer, this might empty our backpressure and thus finish the request */
-        size_t flushedBehindCallback = asyncSocket->flush();
-        if constexpr (IsNodeHttp) {
-            noteNodeHttpWriteProgress(s, httpResponseData, flushedBehindCallback);
-        }
+        asyncSocket->flush();
 
         /* node:http compat: reads were paused while pipelined responses were
          * queued and stayed paused because the socket still had outgoing
